@@ -26,7 +26,7 @@
 - Spectacular Rec iOS 为独立 App Store 应用，内部实现不开放
 - Android 端有商业授权的原生封装（Camera 2 API）
 
-因此，本方案采用 **自研实现**，严格遵循 Spectacular AI 的 [数据格式规范](https://github.com/SpectacularAI/docs/blob/main/other/DATA_FORMAT.md)，确保产出数据可与 Spectacular 生态工具（如 NeRF、3DGS 重建）兼容。若未来 Spectacular 提供 iOS 商业 SDK，可考虑替换为官方实现。
+因此，本方案采用 **自研实现**，严格遵循 Spectacular AI 的 [数据格式规范](https://github.com/SpectacularAI/docs/blob/main/other/DATA_FORMAT.md)，确保产出数据可与 Spectacular 生态工具（如 NeRF、3DGS 重建）兼容。
 
 ### 1.4 效果对比：自研方案 vs Spectacular Rec
 

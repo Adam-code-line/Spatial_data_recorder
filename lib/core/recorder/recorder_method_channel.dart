@@ -27,7 +27,11 @@ class RecorderMethodChannel implements RecorderPlatform {
   }
 
   @override
-  Future<void> stopRecording() async {
-    await _channel.invokeMethod<void>('stopRecording');
+  Future<String> stopRecording() async {
+    final Object? path = await _channel.invokeMethod<Object?>('stopRecording');
+    if (path is String) {
+      return path;
+    }
+    throw StateError('stopRecording 未返回路径');
   }
 }

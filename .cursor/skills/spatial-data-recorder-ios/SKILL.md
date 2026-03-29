@@ -47,15 +47,16 @@ flutter run -d <iphone_device_id>
 | `lib/core/constants/` | `MethodChannel` 名称等常量（与 iOS 一致） |
 | `lib/core/recorder/` | 录制平台抽象与 `MethodChannel` 实现 |
 | `lib/features/home/` | 首页与后续功能入口 |
+| `lib/core/recording/session_directory.dart` | 创建 `Documents/recordings/<uuid>/` 会话目录 |
 
-原生侧：`ios/Runner/AppDelegate.swift` 注册与 Dart 相同的 channel 名；后续可将具体逻辑拆到独立 Swift 文件并在 Xcode 中加入工程。
+原生侧（P0 已实现）：`RecorderFlutterBridge.swift` 处理 MethodChannel；`SlamRecordingSession.swift` 负责相机 + IMU + `data.mov` / `data.jsonl` / `calibration.json` / `metadata.json`；`AppDelegate.swift` 注册 `RecorderFlutterBridge` 并持有强引用。
 
 ## MethodChannel 约定
 
 - **名称**：`com.binwu.reconstruction.spatial_data_recorder/recorder`（与 `lib/core/constants/recorder_channel.dart` 中常量一致）。
 - **Bundle ID**：`com.binwu.reconstruction.spatialDataRecorder`（Xcode / Apple 开发者后台需一致）。
 
-实现清单见仓库内 `docs/Flutter-iOS-SLAM数据采集应用开发指南.md`（Spectacular 数据格式、`data.mov` / `data.jsonl` / `calibration.json` 等）。
+实现清单见仓库内 `docs/Flutter-iOS-SLAM数据采集应用开发指南.md`（Spectacular 数据格式、`data.mov` / `data.jsonl` / `calibration.json` 等）。**阶段划分与 MVP 范围**见 `docs/MVP开发优先级.md`。
 
 ## 依赖用途（pubspec）
 
