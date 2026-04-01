@@ -28,7 +28,26 @@ enum SlamRecordingError: LocalizedError {
   }
 }
 
-/// P0：单目视频 + IMU JSONL + 会话结束写入 calibration / metadata（占位内参）。
+// MARK: - JSONL 缓冲（P1：停止时按 time 升序落盘）
+
+/// 同一时间戳下的稳定次序：陀螺 → 加速度 →（可选）温度 → 视频帧。
+private enum JsonlLineKind: Int {
+  case gyroscope = 0
+  case accelerometer = 1
+  case imuTemperature = 2
+  case frame = 3
+}
+
+private struct PendingJsonlLine {
+  let time: Double
+  let kind: JsonlLineKind
+  let object: [String: Any]
+}
+
+/// P0 + P1：单目视频 + IMU；JSONL 内存缓冲、停止时按 `time` 排序写入；录制开始后锁定对焦/曝光；`calibration.json` 仍为占位内参。
+///
+/// 单位（与 Spectacular DATA_FORMAT 一致）：`gyroscope` 为 **rad/s**（`CMDeviceMotion.rotationRate`）；
+/// `accelerometer` 为 **m/s²**，当前为 `gravity + userAcceleration`（含重力，与设备参考系一致）。
 final class SlamRecordingSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
   let outputDirectory: URL
 
@@ -37,10 +56,12 @@ final class SlamRecordingSession: NSObject, AVCaptureVideoDataOutputSampleBuffer
   private let motionQueue = OperationQueue()
 
   private var captureSession: AVCaptureSession?
+  private var captureDevice: AVCaptureDevice?
   private var videoOutput: AVCaptureVideoDataOutput?
   private var assetWriter: AVAssetWriter?
   private var videoInput: AVAssetWriterInput?
-  private var jsonlHandle: FileHandle?
+
+  private var pendingJsonl: [PendingJsonlLine] = []
 
   private let motionManager = CMMotionManager()
 
@@ -93,6 +114,7 @@ final class SlamRecordingSession: NSObject, AVCaptureVideoDataOutputSampleBuffer
       return
     }
     session.addInput(input)
+    captureDevice = device
 
     let output = AVCaptureVideoDataOutput()
     output.videoSettings = [
@@ -107,14 +129,73 @@ final class SlamRecordingSession: NSObject, AVCaptureVideoDataOutputSampleBuffer
     }
     session.addOutput(output)
 
+    if let conn = output.connection(with: .video), conn.isCameraIntrinsicMatrixDeliverySupported {
+      conn.isCameraIntrinsicMatrixDeliveryEnabled = true
+    }
+
     captureSession = session
     videoOutput = output
 
     session.startRunning()
 
-    DispatchQueue.main.async {
+    DispatchQueue.main.async { [weak self] in
+      guard let self = self else {
+        completion(nil)
+        return
+      }
       UIApplication.shared.isIdleTimerDisabled = true
+      /// 短延迟后再锁定对焦/曝光，使 AE/AF 先收敛（见 `Flutter-iOS-SLAM数据采集应用开发指南` §4.1）。
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+        self?.applyFocusExposureLockIfPossible()
+      }
       completion(nil)
+    }
+  }
+
+  /// 对焦与曝光锁定（链式 completion）。白平衡在曝光完成后尽量锁定，减少录制中漂移。
+  private func applyFocusExposureLockIfPossible() {
+    guard let device = captureDevice else { return }
+
+    let lensPosition = min(max(device.lensPosition, 0), 1)
+
+    do {
+      try device.lockForConfiguration()
+      if device.isFocusPointOfInterestSupported {
+        device.focusPointOfInterest = CGPoint(x: 0.5, y: 0.5)
+      }
+      if device.isExposurePointOfInterestSupported {
+        device.exposurePointOfInterest = CGPoint(x: 0.5, y: 0.5)
+      }
+      device.unlockForConfiguration()
+    } catch {
+      return
+    }
+
+    device.setFocusModeLocked(lensPosition: lensPosition) { [weak self] _ in
+      guard let device = self?.captureDevice else { return }
+      do {
+        try device.lockForConfiguration()
+        guard device.isExposureModeSupported(.custom) else {
+          device.unlockForConfiguration()
+          return
+        }
+        let duration = device.exposureDuration
+        let iso = min(max(device.iso, device.activeFormat.minISO), device.activeFormat.maxISO)
+        device.setExposureModeCustom(duration: duration, iso: iso) { _ in
+          guard let device = self?.captureDevice else { return }
+          do {
+            try device.lockForConfiguration()
+            if device.isWhiteBalanceModeSupported(.locked) {
+              device.whiteBalanceMode = .locked
+            }
+            device.unlockForConfiguration()
+          } catch {
+            try? device.unlockForConfiguration()
+          }
+        }
+      } catch {
+        try? device.unlockForConfiguration()
+      }
     }
   }
 
@@ -150,7 +231,6 @@ final class SlamRecordingSession: NSObject, AVCaptureVideoDataOutputSampleBuffer
       firstVideoPts = pts
       timeOriginMedia = CACurrentMediaTime()
       startMotion()
-      openJsonlIfNeeded()
       didStartWriter = true
       appendFrameJsonl(number: frameIndex, sampleBuffer: sampleBuffer)
       frameIndex += 1
@@ -206,17 +286,6 @@ final class SlamRecordingSession: NSObject, AVCaptureVideoDataOutputSampleBuffer
     }
   }
 
-  private func openJsonlIfNeeded() {
-    guard jsonlHandle == nil else { return }
-    let url = outputDirectory.appendingPathComponent("data.jsonl")
-    FileManager.default.createFile(atPath: url.path, contents: nil)
-    do {
-      jsonlHandle = try FileHandle(forWritingTo: url)
-    } catch {
-      jsonlHandle = nil
-    }
-  }
-
   private func startMotion() {
     guard motionManager.isDeviceMotionAvailable else { return }
     motionManager.deviceMotionUpdateInterval = 1.0 / 100.0
@@ -240,20 +309,28 @@ final class SlamRecordingSession: NSObject, AVCaptureVideoDataOutputSampleBuffer
     let ay = motion.gravity.y + motion.userAcceleration.y
     let az = motion.gravity.z + motion.userAcceleration.z
 
-    writeJsonLine([
-      "time": t,
-      "sensor": [
-        "type": "gyroscope",
-        "values": [gx, gy, gz],
-      ],
-    ])
-    writeJsonLine([
-      "time": t,
-      "sensor": [
-        "type": "accelerometer",
-        "values": [ax, ay, az],
-      ],
-    ])
+    enqueueJsonl(
+      time: t,
+      kind: .gyroscope,
+      object: [
+        "time": t,
+        "sensor": [
+          "type": "gyroscope",
+          "values": [gx, gy, gz],
+        ],
+      ]
+    )
+    enqueueJsonl(
+      time: t,
+      kind: .accelerometer,
+      object: [
+        "time": t,
+        "sensor": [
+          "type": "accelerometer",
+          "values": [ax, ay, az],
+        ],
+      ]
+    )
   }
 
   private func appendFrameJsonl(number: Int, sampleBuffer: CMSampleBuffer) {
@@ -262,26 +339,46 @@ final class SlamRecordingSession: NSObject, AVCaptureVideoDataOutputSampleBuffer
     let rel = CMTimeSubtract(pts, first)
     let t = CMTimeGetSeconds(rel)
 
-    writeJsonLine([
-      "number": number,
-      "time": t,
-      "frames": [
-        ["cameraInd": 0] as [String: Any],
-      ],
-    ])
+    enqueueJsonl(
+      time: t,
+      kind: .frame,
+      object: [
+        "number": number,
+        "time": t,
+        "frames": [
+          ["cameraInd": 0] as [String: Any],
+        ],
+      ]
+    )
   }
 
-  private func writeJsonLine(_ object: [String: Any]) {
-    guard let h = jsonlHandle else { return }
-    guard JSONSerialization.isValidJSONObject(object),
-          let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
-          let line = String(data: data, encoding: .utf8)
-    else {
-      return
+  private func enqueueJsonl(time: Double, kind: JsonlLineKind, object: [String: Any]) {
+    pendingJsonl.append(PendingJsonlLine(time: time, kind: kind, object: object))
+  }
+
+  /// P1：整段会话缓冲于内存，停止时按 `time` 升序、同类稳定次序一次写入（减少录制中频繁刷盘）。
+  private func writeSortedJsonlToDisk() {
+    guard !pendingJsonl.isEmpty else { return }
+    let sorted = pendingJsonl.sorted { a, b in
+      if a.time != b.time { return a.time < b.time }
+      return a.kind.rawValue < b.kind.rawValue
     }
-    if let nl = (line + "\n").data(using: .utf8) {
-      h.write(nl)
+    let url = outputDirectory.appendingPathComponent("data.jsonl")
+    try? FileManager.default.removeItem(at: url)
+    var blob = Data()
+    for line in sorted {
+      guard JSONSerialization.isValidJSONObject(line.object),
+            let data = try? JSONSerialization.data(withJSONObject: line.object, options: [.sortedKeys]),
+            let s = String(data: data, encoding: .utf8)
+      else {
+        continue
+      }
+      if let nl = (s + "\n").data(using: .utf8) {
+        blob.append(nl)
+      }
     }
+    try? blob.write(to: url, options: [.atomic])
+    pendingJsonl.removeAll()
   }
 
   func stop(completion: @escaping (Result<URL, Error>) -> Void) {
@@ -298,11 +395,12 @@ final class SlamRecordingSession: NSObject, AVCaptureVideoDataOutputSampleBuffer
     captureSession?.stopRunning()
     captureSession = nil
     videoOutput = nil
+    captureDevice = nil
+
+    writeSortedJsonlToDisk()
 
     let finalizeSuccess: () -> Void = { [weak self] in
       guard let self = self else { return }
-      self.jsonlHandle?.closeFile()
-      self.jsonlHandle = nil
       self.assetWriter = nil
       self.videoInput = nil
 
@@ -321,8 +419,6 @@ final class SlamRecordingSession: NSObject, AVCaptureVideoDataOutputSampleBuffer
         guard let self = self else { return }
         self.syncQueue.async {
           if writer.status == .failed {
-            self.jsonlHandle?.closeFile()
-            self.jsonlHandle = nil
             self.assetWriter = nil
             self.videoInput = nil
             let err = writer.error ?? SlamRecordingError.writerSetupFailed("unknown")
@@ -336,8 +432,6 @@ final class SlamRecordingSession: NSObject, AVCaptureVideoDataOutputSampleBuffer
         }
       }
     } else {
-      jsonlHandle?.closeFile()
-      jsonlHandle = nil
       assetWriter = nil
       videoInput = nil
       finalizeSuccess()
@@ -373,10 +467,16 @@ final class SlamRecordingSession: NSObject, AVCaptureVideoDataOutputSampleBuffer
 
   private func writeMetadataJson() {
     let model = SlamRecordingSession.machineModelName()
-    let root: [String: Any] = [
+    var root: [String: Any] = [
       "device_model": model,
       "platform": "ios",
+      /// `imuTemperature`：Core Motion 无公开 API；不写入伪造数据（P1）。
+      "imu_temperature_status": "unavailable_no_public_api_ios",
     ]
+    root["p1"] = [
+      "jsonl_sorted_by_time": true,
+      "focus_exposure_locked_after_delay_s": 0.2,
+    ] as [String: Any]
     writeJsonFile(name: "metadata.json", object: root)
   }
 
