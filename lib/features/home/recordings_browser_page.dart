@@ -1,0 +1,118 @@
+import 'dart:io';
+
+import 'package:flutter/material.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+
+class RecordingsBrowserPage extends StatefulWidget {
+  const RecordingsBrowserPage({super.key});
+
+  @override
+  State<RecordingsBrowserPage> createState() => _RecordingsBrowserPageState();
+}
+
+class _RecordingsBrowserPageState extends State<RecordingsBrowserPage> {
+  Directory? _currentDir;
+  List<FileSystemEntity> _entries = const [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadRoot();
+  }
+
+  Future<void> _loadRoot() async {
+    final docs = await getApplicationDocumentsDirectory();
+    final outputDir = Directory(p.join(docs.path, 'output'));
+    if (!await outputDir.exists()) {
+      await outputDir.create(recursive: true);
+    }
+    await _openDirectory(outputDir);
+  }
+
+  Future<void> _openDirectory(Directory dir) async {
+    setState(() {
+      _loading = true;
+    });
+
+    final entries = dir.listSync(followLinks: false);
+    entries.sort((a, b) {
+      final aIsDir = a is Directory;
+      final bIsDir = b is Directory;
+      if (aIsDir != bIsDir) {
+        return aIsDir ? -1 : 1;
+      }
+      return p.basename(a.path).compareTo(p.basename(b.path));
+    });
+
+    if (!mounted) return;
+    setState(() {
+      _currentDir = dir;
+      _entries = entries;
+      _loading = false;
+    });
+  }
+
+  Future<void> _handleTap(FileSystemEntity entity) async {
+    if (entity is Directory) {
+      await _openDirectory(entity);
+      return;
+    }
+    if (entity is File) {
+      final stat = await entity.stat();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('${p.basename(entity.path)} (${stat.size} bytes)'),
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final dir = _currentDir;
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(dir == null ? '录制文件' : p.basename(dir.path)),
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () async {
+            final current = _currentDir;
+            if (current == null) {
+              Navigator.of(context).maybePop();
+              return;
+            }
+            final parent = current.parent;
+            if (parent.path == current.path ||
+                p.basename(current.path) == 'output') {
+              Navigator.of(context).maybePop();
+              return;
+            }
+            await _openDirectory(parent);
+          },
+        ),
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : ListView.separated(
+              itemCount: _entries.length,
+              separatorBuilder: (_, _) => const Divider(height: 1),
+              itemBuilder: (context, index) {
+                final entry = _entries[index];
+                final isDir = entry is Directory;
+                final name = p.basename(entry.path);
+                return ListTile(
+                  leading: Icon(isDir ? Icons.folder : Icons.insert_drive_file),
+                  title: Text(name),
+                  trailing: Icon(
+                    isDir ? Icons.chevron_right : Icons.more_horiz,
+                  ),
+                  onTap: () => _handleTap(entry),
+                );
+              },
+            ),
+    );
+  }
+}

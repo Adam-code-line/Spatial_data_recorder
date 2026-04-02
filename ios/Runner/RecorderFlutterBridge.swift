@@ -1,14 +1,37 @@
+import AVFoundation
 import Flutter
 import Foundation
 
 /// 将 `SlamRecordingSession` 接到 Flutter `MethodChannel`。
 final class RecorderFlutterBridge {
+  static let sessionDidChangeNotification = Notification.Name("RecorderSessionDidChangeNotification")
+
   private let messenger: FlutterBinaryMessenger
+  private let previewController = CameraPreviewController()
   private var session: SlamRecordingSession?
   private var lastCompletedSessionPath: String?
 
   init(messenger: FlutterBinaryMessenger) {
     self.messenger = messenger
+  }
+
+  private func notifySessionChanged() {
+    DispatchQueue.main.async {
+      NotificationCenter.default.post(name: Self.sessionDidChangeNotification, object: nil)
+    }
+  }
+
+  func currentCaptureSession() -> AVCaptureSession? {
+    session?.currentCaptureSession ?? previewController.currentSession()
+  }
+
+  func ensurePreviewReady() {
+    guard session == nil else { return }
+    previewController.start(requestPermission: false) { [weak self] ok in
+      if ok {
+        self?.notifySessionChanged()
+      }
+    }
   }
 
   func register() {
@@ -23,6 +46,14 @@ final class RecorderFlutterBridge {
 
   private func handle(call: FlutterMethodCall, result: @escaping FlutterResult) {
     switch call.method {
+    case "preparePreview":
+      previewController.start(requestPermission: true) { ok in
+        if ok {
+          self.notifySessionChanged()
+        }
+        result(nil)
+      }
+
     case "getRecordingStatus":
       result([
         "recording": session != nil,
@@ -51,9 +82,16 @@ final class RecorderFlutterBridge {
       }
 
       let url = URL(fileURLWithPath: path, isDirectory: true)
+      notifySessionChanged()
+      previewController.stop()
       let s = SlamRecordingSession(outputDirectory: url)
       s.start { [weak self] error in
         if let error = error {
+          self?.previewController.start(requestPermission: false) { ok in
+            if ok {
+              self?.notifySessionChanged()
+            }
+          }
           result(
             FlutterError(
               code: "start_failed",
@@ -64,6 +102,7 @@ final class RecorderFlutterBridge {
           return
         }
         self?.session = s
+        self?.notifySessionChanged()
         result(nil)
       }
 
@@ -80,6 +119,12 @@ final class RecorderFlutterBridge {
       }
       s.stop { [weak self] res in
         self?.session = nil
+        self?.notifySessionChanged()
+        self?.previewController.start(requestPermission: false) { ok in
+          if ok {
+            self?.notifySessionChanged()
+          }
+        }
         switch res {
         case .success(let url):
           self?.lastCompletedSessionPath = url.path

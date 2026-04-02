@@ -5,6 +5,8 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../../core/recording/session_directory.dart';
 import '../../core/recorder/recorder_providers.dart';
+import 'recordings_browser_page.dart';
+import 'recorder_live_preview.dart';
 
 class HomePage extends ConsumerStatefulWidget {
   const HomePage({super.key});
@@ -15,8 +17,6 @@ class HomePage extends ConsumerStatefulWidget {
 
 class _HomePageState extends ConsumerState<HomePage> {
   Map<String, dynamic>? _status;
-  Object? _lastError;
-  String? _activeSessionPath;
   bool _busy = false;
 
   bool get _isIos => !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
@@ -60,9 +60,6 @@ class _HomePageState extends ConsumerState<HomePage> {
   }
 
   Future<void> _refreshStatus() async {
-    setState(() {
-      _lastError = null;
-    });
     try {
       final status = await ref
           .read(recorderPlatformProvider)
@@ -73,11 +70,7 @@ class _HomePageState extends ConsumerState<HomePage> {
         });
       }
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _lastError = e;
-        });
-      }
+      _toast('刷新状态失败：$e');
     }
   }
 
@@ -88,7 +81,6 @@ class _HomePageState extends ConsumerState<HomePage> {
     }
     setState(() {
       _busy = true;
-      _lastError = null;
     });
     try {
       final ok = await _ensureCameraPermission();
@@ -97,7 +89,6 @@ class _HomePageState extends ConsumerState<HomePage> {
       }
 
       final dir = await createSessionDirectory();
-      _activeSessionPath = dir.path;
 
       await ref
           .read(recorderPlatformProvider)
@@ -107,11 +98,7 @@ class _HomePageState extends ConsumerState<HomePage> {
         _toast('已开始录制');
       }
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _lastError = e;
-        });
-      }
+      _toast('开始录制失败：$e');
     } finally {
       if (mounted) {
         setState(() {
@@ -127,21 +114,15 @@ class _HomePageState extends ConsumerState<HomePage> {
     }
     setState(() {
       _busy = true;
-      _lastError = null;
     });
     try {
-      final path = await ref.read(recorderPlatformProvider).stopRecording();
-      _activeSessionPath = path;
+      await ref.read(recorderPlatformProvider).stopRecording();
       await _refreshStatus();
       if (mounted) {
-        _toast('已停止。数据目录：$path');
+        _toast('已停止录制');
       }
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _lastError = e;
-        });
-      }
+      _toast('停止录制失败：$e');
     } finally {
       if (mounted) {
         setState(() {
@@ -149,6 +130,22 @@ class _HomePageState extends ConsumerState<HomePage> {
         });
       }
     }
+  }
+
+  Future<void> _toggleRecording() async {
+    final recording = _status?['recording'] == true;
+    if (recording) {
+      await _stopRecording();
+      return;
+    }
+    await _startRecording();
+  }
+
+  Future<void> _openRecordings() async {
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => const RecordingsBrowserPage()),
+    );
   }
 
   void _toast(String msg) {
@@ -161,73 +158,99 @@ class _HomePageState extends ConsumerState<HomePage> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _refreshStatus());
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (_isIos) {
+        try {
+          await ref.read(recorderPlatformProvider).preparePreview();
+        } catch (_) {}
+      }
+      await _refreshStatus();
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     final recording = _status?['recording'] == true;
-    final lastPath = _status?['lastCompletedSessionPath'] as String?;
+    final bottomInset = MediaQuery.of(context).padding.bottom;
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Spatial Data Recorder'),
-        actions: [
-          IconButton(
-            tooltip: '刷新状态',
-            onPressed: _busy ? null : _refreshStatus,
-            icon: const Icon(Icons.sync),
-          ),
-        ],
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+      backgroundColor: Colors.black,
+      body: SafeArea(
+        bottom: false,
+        child: Stack(
+          fit: StackFit.expand,
           children: [
-            Text(
-              _isIos
-                  ? 'P0：生成 data.mov、data.jsonl、calibration.json、metadata.json（单目 + IMU，无麦克风）。'
-                  : '当前平台为 ${_platformLabel()}；完整采集请使用 iOS 真机。',
-              style: Theme.of(context).textTheme.bodyMedium,
-            ),
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                FilledButton.icon(
-                  onPressed: (_busy || recording || !_isIos)
-                      ? null
-                      : _startRecording,
-                  icon: const Icon(Icons.fiber_manual_record),
-                  label: const Text('开始录制'),
+            if (_isIos)
+              const RecorderLivePreview()
+            else
+              Center(
+                child: Text(
+                  '当前平台：${_platformLabel()}',
+                  style: const TextStyle(color: Colors.white70),
                 ),
-                const SizedBox(width: 12),
-                FilledButton.tonalIcon(
-                  onPressed: (_busy || !recording || !_isIos)
-                      ? null
-                      : _stopRecording,
-                  icon: const Icon(Icons.stop),
-                  label: const Text('停止'),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            if (_busy) const LinearProgressIndicator(),
-            const SizedBox(height: 8),
-            if (_lastError != null)
-              Text(
-                '错误: $_lastError',
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
               ),
-            if (_status != null) Text('状态: $_status'),
-            if (lastPath != null) ...[
-              const SizedBox(height: 8),
-              SelectableText('上次完成目录：\n$lastPath'),
-            ],
-            if (_activeSessionPath != null) ...[
-              const SizedBox(height: 8),
-              SelectableText('当前会话目录：\n$_activeSessionPath'),
-            ],
+            if (_busy)
+              const Align(
+                alignment: Alignment.topCenter,
+                child: LinearProgressIndicator(minHeight: 2),
+              ),
+            Positioned(
+              left: 16,
+              right: 16,
+              bottom: bottomInset + 12,
+              child: Row(
+                children: [
+                  const SizedBox(width: 56),
+                  Expanded(
+                    child: Center(
+                      child: GestureDetector(
+                        onTap: (_busy || !_isIos) ? null : _toggleRecording,
+                        child: Container(
+                          width: 88,
+                          height: 88,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            border: Border.all(color: Colors.white, width: 4),
+                          ),
+                          child: Center(
+                            child: AnimatedContainer(
+                              duration: const Duration(milliseconds: 180),
+                              width: recording ? 30 : 62,
+                              height: recording ? 30 : 62,
+                              decoration: BoxDecoration(
+                                color: Colors.red,
+                                borderRadius: BorderRadius.circular(
+                                  recording ? 8 : 31,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 56,
+                    height: 56,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.18),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: Colors.white24),
+                      ),
+                      child: IconButton(
+                        onPressed: _openRecordings,
+                        tooltip: '打开文件夹',
+                        icon: const Icon(
+                          Icons.folder_open,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ],
         ),
       ),

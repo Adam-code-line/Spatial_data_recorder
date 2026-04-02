@@ -63,6 +63,10 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
 {
   let outputDirectory: URL
 
+  var currentCaptureSession: AVCaptureSession? {
+    captureSession
+  }
+
   private let syncQueue = DispatchQueue(label: "com.binwu.reconstruction.spatial_data_recorder.recording")
   private let videoQueue = DispatchQueue(label: "com.binwu.reconstruction.spatial_data_recorder.video")
   private let motionQueue = OperationQueue()
@@ -282,7 +286,6 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
 
     let session = AVCaptureMultiCamSession()
     session.beginConfiguration()
-    session.sessionPreset = .high
 
     guard
       let inWide = try? AVCaptureDeviceInput(device: wide),
@@ -397,18 +400,17 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     guard !isStopping, let vOut = videoOutput, let dOut = depthOutput else { return }
 
     guard
-      let vidSync = collection.synchronizedData(for: vOut) as? AVCaptureSynchronizedSampleBufferData,
-      let sampleBuffer = vidSync.sampleBuffer
+      let vidSync = collection.synchronizedData(for: vOut) as? AVCaptureSynchronizedSampleBufferData
     else {
       return
     }
+    let sampleBuffer = vidSync.sampleBuffer
 
     var depthDataObj: AVDepthData?
     if let depSync = collection.synchronizedData(for: dOut) as? AVCaptureSynchronizedDepthData,
-       !depSync.depthDataWasDropped,
-       let dd = depSync.depthData
+       !depSync.depthDataWasDropped
     {
-      depthDataObj = dd
+      depthDataObj = depSync.depthData
     }
 
     guard let depthData = depthDataObj,
@@ -441,7 +443,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
   /// 将深度图转为 BGRA8，用于写入 `data2.mov`
   private static func depthFloat32ToGrayBGRA(depthData: AVDepthData) -> CVPixelBuffer? {
     let converted = depthData.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32)
-    guard let depthMap = converted.depthDataMap else { return nil }
+    let depthMap = converted.depthDataMap
 
     let w = CVPixelBufferGetWidth(depthMap)
     let h = CVPixelBufferGetHeight(depthMap)
@@ -616,6 +618,10 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     }
 
     let hasSecond = captureMode != .singleWide && secondSample != nil && assetWriter2 != nil && videoInput2 != nil
+    let secondInputReady = !hasSecond || (videoInput2?.isReadyForMoreMediaData ?? false)
+    guard secondInputReady else {
+      return
+    }
 
     if !didStartWriter {
       let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
@@ -707,10 +713,13 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       let input = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
       input.expectsMediaDataInRealTime = true
 
-      guard writer.canAdd(input), writer.startWriting() else {
+      guard writer.canAdd(input) else {
         return false
       }
       writer.add(input)
+      guard writer.startWriting() else {
+        return false
+      }
 
       assetWriter = writer
       videoInput = input
@@ -744,10 +753,13 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       ]
       let input2 = AVAssetWriterInput(mediaType: .video, outputSettings: settings2)
       input2.expectsMediaDataInRealTime = true
-      guard writer2.canAdd(input2), writer2.startWriting() else {
+      guard writer2.canAdd(input2) else {
         return true
       }
       writer2.add(input2)
+      guard writer2.startWriting() else {
+        return true
+      }
       assetWriter2 = writer2
       videoInput2 = input2
     } catch {
@@ -1066,42 +1078,46 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       if device.isExposurePointOfInterestSupported {
         device.exposurePointOfInterest = CGPoint(x: 0.5, y: 0.5)
       }
+      guard device.isFocusModeSupported(.locked) else {
+        device.unlockForConfiguration()
+        return
+      }
+
+      device.setFocusModeLocked(lensPosition: lensPosition) { [weak self] _ in
+        guard let device = self?.captureDevice else { return }
+        do {
+          try device.lockForConfiguration()
+          guard device.isExposureModeSupported(.custom) else {
+            device.unlockForConfiguration()
+            return
+          }
+          let duration = device.exposureDuration
+          let iso = min(max(device.iso, device.activeFormat.minISO), device.activeFormat.maxISO)
+          self?.syncQueue.async {
+            self?.lockedExposureDurationSeconds = CMTimeGetSeconds(duration)
+          }
+          device.setExposureModeCustom(duration: duration, iso: iso) { [weak self] _ in
+            guard let device = self?.captureDevice else { return }
+            self?.syncQueue.async {
+              self?.lockedExposureDurationSeconds = CMTimeGetSeconds(device.exposureDuration)
+            }
+            do {
+              try device.lockForConfiguration()
+              if device.isWhiteBalanceModeSupported(.locked) {
+                device.whiteBalanceMode = .locked
+              }
+              device.unlockForConfiguration()
+            } catch {
+              try? device.unlockForConfiguration()
+            }
+          }
+        } catch {
+          try? device.unlockForConfiguration()
+        }
+      }
       device.unlockForConfiguration()
     } catch {
-      return
-    }
-
-    device.setFocusModeLocked(lensPosition: lensPosition) { [weak self] _ in
-      guard let device = self?.captureDevice else { return }
-      do {
-        try device.lockForConfiguration()
-        guard device.isExposureModeSupported(.custom) else {
-          device.unlockForConfiguration()
-          return
-        }
-        let duration = device.exposureDuration
-        let iso = min(max(device.iso, device.activeFormat.minISO), device.activeFormat.maxISO)
-        self?.syncQueue.async {
-          self?.lockedExposureDurationSeconds = CMTimeGetSeconds(duration)
-        }
-        device.setExposureModeCustom(duration: duration, iso: iso) { [weak self] _ in
-          guard let device = self?.captureDevice else { return }
-          self?.syncQueue.async {
-            self?.lockedExposureDurationSeconds = CMTimeGetSeconds(device.exposureDuration)
-          }
-          do {
-            try device.lockForConfiguration()
-            if device.isWhiteBalanceModeSupported(.locked) {
-              device.whiteBalanceMode = .locked
-            }
-            device.unlockForConfiguration()
-          } catch {
-            try? device.unlockForConfiguration()
-          }
-        }
-      } catch {
-        try? device.unlockForConfiguration()
-      }
+      try? device.unlockForConfiguration()
     }
   }
 

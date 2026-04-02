@@ -5,14 +5,20 @@ import 'recorder_platform.dart';
 
 class RecorderMethodChannel implements RecorderPlatform {
   RecorderMethodChannel()
-      : _channel = const MethodChannel(RecorderChannel.name);
+    : _channel = const MethodChannel(RecorderChannel.name);
 
   final MethodChannel _channel;
 
   @override
+  Future<void> preparePreview() async {
+    await _channel.invokeMethod<void>('preparePreview');
+  }
+
+  @override
   Future<Map<String, dynamic>> getRecordingStatus() async {
-    final Object? result =
-        await _channel.invokeMethod<Object?>('getRecordingStatus');
+    final Object? result = await _channel.invokeMethod<Object?>(
+      'getRecordingStatus',
+    );
     if (result is Map) {
       return Map<String, dynamic>.from(result);
     }

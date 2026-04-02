@@ -49,5 +49,9 @@
 	<string>用于 SLAM 数据采集的相机录制</string>
 	<key>NSMotionUsageDescription</key>
 	<string>用于采集 IMU 传感器数据以支持视觉惯性里程计</string>
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
 </dict>
 </plist>
