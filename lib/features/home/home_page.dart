@@ -19,16 +19,54 @@ class _HomePageState extends ConsumerState<HomePage> {
   String? _activeSessionPath;
   bool _busy = false;
 
-  bool get _isIos =>
-      !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
+  bool get _isIos => !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
+
+  Future<bool> _ensureCameraPermission() async {
+    var status = await Permission.camera.status;
+    if (status.isGranted) return true;
+
+    status = await Permission.camera.request();
+    if (status.isGranted) return true;
+
+    if (status.isPermanentlyDenied || status.isRestricted) {
+      if (!mounted) return false;
+      final goSettings = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('需要相机权限'),
+          content: const Text(
+            '当前相机权限被拒绝，请前往 iOS 设置中为 Spatial Data Recorder 打开相机权限。',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('取消'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('去设置'),
+            ),
+          ],
+        ),
+      );
+      if (goSettings == true) {
+        await openAppSettings();
+      }
+      return false;
+    }
+
+    _toast('需要相机权限才能录制视频。');
+    return false;
+  }
 
   Future<void> _refreshStatus() async {
     setState(() {
       _lastError = null;
     });
     try {
-      final status =
-          await ref.read(recorderPlatformProvider).getRecordingStatus();
+      final status = await ref
+          .read(recorderPlatformProvider)
+          .getRecordingStatus();
       if (mounted) {
         setState(() {
           _status = status;
@@ -53,18 +91,17 @@ class _HomePageState extends ConsumerState<HomePage> {
       _lastError = null;
     });
     try {
-      final cam = await Permission.camera.request();
-      if (!cam.isGranted) {
-        _toast('需要相机权限才能录制视频。');
+      final ok = await _ensureCameraPermission();
+      if (!ok) {
         return;
       }
 
       final dir = await createSessionDirectory();
       _activeSessionPath = dir.path;
 
-      await ref.read(recorderPlatformProvider).startRecording(
-            outputDir: dir.path,
-          );
+      await ref
+          .read(recorderPlatformProvider)
+          .startRecording(outputDir: dir.path);
       await _refreshStatus();
       if (mounted) {
         _toast('已开始录制');
@@ -93,8 +130,7 @@ class _HomePageState extends ConsumerState<HomePage> {
       _lastError = null;
     });
     try {
-      final path =
-          await ref.read(recorderPlatformProvider).stopRecording();
+      final path = await ref.read(recorderPlatformProvider).stopRecording();
       _activeSessionPath = path;
       await _refreshStatus();
       if (mounted) {
@@ -119,9 +155,7 @@ class _HomePageState extends ConsumerState<HomePage> {
     if (!mounted) {
       return;
     }
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(msg)),
-    );
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
   @override

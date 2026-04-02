@@ -278,7 +278,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     else {
       return false
     }
-    guard AVCaptureMultiCamSession.isMultiCamSupported(for: [wide, ultra]) else { return false }
+    guard AVCaptureMultiCamSession.isMultiCamSupported else { return false }
 
     let session = AVCaptureMultiCamSession()
     session.beginConfiguration()
