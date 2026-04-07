@@ -91,7 +91,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
   private let motionManager = CMMotionManager()
 
   private var captureMode: DualCaptureMode = .singleWide
-  private var shouldExportDepthPngFrames = false
+  private var shouldExportFrames2PngSequence = false
 
   private var timeOriginMedia: CFTimeInterval = 0
   private var firstVideoPts: CMTime?
@@ -175,7 +175,9 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       return
     }
 
-    shouldExportDepthPngFrames = captureMode == .depthAndWide
+    // Keep frames2/*.png in all dual-stream modes so uploaded session layout
+    // stays aligned with the sample structure.
+    shouldExportFrames2PngSequence = captureMode != .singleWide
     lastDepthToWideExtrinsic = nil
     lastPrimaryImuToCameraSource = "capture_convention_back_camera_axes"
     lastSecondaryImuToCameraSource = "not_applicable_single_camera"
@@ -377,7 +379,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
 
   private func prepareFrames2DirectoryIfNeeded() {
     let fm = FileManager.default
-    if shouldExportDepthPngFrames {
+    if shouldExportFrames2PngSequence {
       try? fm.removeItem(at: frames2DirectoryURL)
       try? fm.createDirectory(at: frames2DirectoryURL, withIntermediateDirectories: true)
     } else {
@@ -640,7 +642,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
         isDepthGray: captureMode == .depthAndWide,
         depthCalibration: depthCalibration
       )
-      exportDepthFramePngIfNeeded(secondSample: secondSample, frameNumber: frameIndex)
+      exportFrames2PngIfNeeded(secondSample: secondSample, frameNumber: frameIndex)
       frameIndex += 1
       input.append(sampleBuffer)
       if hasSecond, let i2 = videoInput2, let sb2 = secondSample {
@@ -656,7 +658,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       isDepthGray: captureMode == .depthAndWide,
       depthCalibration: depthCalibration
     )
-    exportDepthFramePngIfNeeded(secondSample: secondSample, frameNumber: frameIndex)
+    exportFrames2PngIfNeeded(secondSample: secondSample, frameNumber: frameIndex)
     frameIndex += 1
     input.append(sampleBuffer)
     if hasSecond, let i2 = videoInput2, let sb2 = secondSample {
@@ -664,16 +666,28 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     }
   }
 
-  private func exportDepthFramePngIfNeeded(secondSample: CMSampleBuffer?, frameNumber: Int) {
-    guard shouldExportDepthPngFrames,
+  private func exportFrames2PngIfNeeded(secondSample: CMSampleBuffer?, frameNumber: Int) {
+    guard shouldExportFrames2PngSequence,
           let sb2 = secondSample,
           let pixelBuffer = CMSampleBufferGetImageBuffer(sb2)
     else {
       return
     }
 
-    let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-    guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else {
+    let sourceImage = CIImage(cvPixelBuffer: pixelBuffer)
+    let pngImage: CIImage
+    if captureMode == .multiCamRgb {
+      // MultiCam fallback has RGB second stream; convert to grayscale PNG sequence
+      // to keep frames2 output shape aligned with sample data.
+      pngImage = sourceImage.applyingFilter(
+        "CIColorControls",
+        parameters: [kCIInputSaturationKey: 0.0]
+      )
+    } else {
+      pngImage = sourceImage
+    }
+
+    guard let cgImage = ciContext.createCGImage(pngImage, from: pngImage.extent) else {
       return
     }
 
@@ -1284,7 +1298,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       "magnetometer_jsonl": true,
       "per_frame_calibration_rgb": true,
       "dual_camera_data2": captureMode != .singleWide,
-      "frames2_png_sequence": shouldExportDepthPngFrames,
+      "frames2_png_sequence": shouldExportFrames2PngSequence,
       "imu_temperature_jsonl": false,
     ] as [String: Any]
     root["calibration_capture_sources"] = [

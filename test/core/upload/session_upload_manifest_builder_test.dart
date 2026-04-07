@@ -100,5 +100,41 @@ void main() {
         ),
       );
     });
+
+    test(
+      'throws when data2.mov exists but frames2 png sequence is missing',
+      () async {
+        final sessionDir = Directory(
+          p.join(tempRoot.path, 'recording_2026-04-06'),
+        );
+        await sessionDir.create(recursive: true);
+
+        for (final name in const <String>[
+          'data.mov',
+          'data.jsonl',
+          'calibration.json',
+          'metadata.json',
+        ]) {
+          await File(
+            p.join(sessionDir.path, name),
+          ).writeAsString('required-$name');
+        }
+
+        await File(
+          p.join(sessionDir.path, 'data2.mov'),
+        ).writeAsString('optional-data2');
+
+        expect(
+          () => builder.buildFromSessionPath(sessionDir.path),
+          throwsA(
+            isA<UploadException>().having(
+              (error) => error.reason,
+              'reason',
+              UploadFailureReason.missingRequiredFile,
+            ),
+          ),
+        );
+      },
+    );
   });
 }
