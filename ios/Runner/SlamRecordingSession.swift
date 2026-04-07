@@ -213,6 +213,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     do {
       try device.lockForConfiguration()
       device.activeFormat = format
+      Self.disableHdrIfPossible(device: device)
       device.unlockForConfiguration()
     } catch {
       session.commitConfiguration()
@@ -263,17 +264,42 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
 
   private static func pickFormatWithDepth(device: AVCaptureDevice) -> AVCaptureDevice.Format? {
     var best: AVCaptureDevice.Format?
-    var bestArea: Int32 = 0
+    var bestScore = Int64.min
+
     for format in device.formats {
       if format.supportedDepthDataFormats.isEmpty { continue }
+
       let dim = format.formatDescription.dimensions
-      let area = dim.width * dim.height
-      if area > bestArea {
-        bestArea = area
+      let area = Int64(dim.width) * Int64(dim.height)
+      let subtype = CMFormatDescriptionGetMediaSubType(format.formatDescription)
+
+      // Prefer standard 8-bit YUV (SDR-friendly) to avoid washed-looking video.
+      let colorScore: Int64
+      switch subtype {
+      case kCVPixelFormatType_420YpCbCr8BiPlanarFullRange:
+        colorScore = 3
+      case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange:
+        colorScore = 2
+      default:
+        colorScore = 0
+      }
+
+      let hdrPenalty: Int64 = format.isVideoHDRSupported ? -1 : 0
+      let score = colorScore * 1_000_000_000 + area * 1_000 + hdrPenalty
+
+      if score > bestScore {
+        bestScore = score
         best = format
       }
     }
     return best
+  }
+
+  private static func disableHdrIfPossible(device: AVCaptureDevice) {
+    device.automaticallyAdjustsVideoHDREnabled = false
+    if device.isVideoHDREnabled {
+      device.isVideoHDREnabled = false
+    }
   }
 
   /// 双路 RGB：广角 + 超广角（无 LiDAR 深度时）
@@ -285,6 +311,22 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       return false
     }
     guard AVCaptureMultiCamSession.isMultiCamSupported else { return false }
+
+    do {
+      try wide.lockForConfiguration()
+      Self.disableHdrIfPossible(device: wide)
+      wide.unlockForConfiguration()
+    } catch {
+      return false
+    }
+
+    do {
+      try ultra.lockForConfiguration()
+      Self.disableHdrIfPossible(device: ultra)
+      ultra.unlockForConfiguration()
+    } catch {
+      return false
+    }
 
     let session = AVCaptureMultiCamSession()
     session.beginConfiguration()
@@ -346,7 +388,20 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     session.sessionPreset = .high
 
     guard
-      let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
+      let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
+    else {
+      return false
+    }
+
+    do {
+      try device.lockForConfiguration()
+      Self.disableHdrIfPossible(device: device)
+      device.unlockForConfiguration()
+    } catch {
+      return false
+    }
+
+    guard
       let input = try? AVCaptureDeviceInput(device: device),
       session.canAddInput(input)
     else {
