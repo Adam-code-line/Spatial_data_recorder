@@ -117,7 +117,7 @@ class SessionUploadManifestBuilder {
     if (hasData2Mov && frames2FileCount == 0) {
       throw UploadException(
         reason: UploadFailureReason.missingRequiredFile,
-        message: '检测到 data2.mov 但缺少 frames2/*.png，请重新录制以生成二路逐帧灰度图。',
+        message: '检测到 data2.mov 但缺少 frames2/*.png，请重新录制以生成二路逐帧图像。',
       );
     }
 

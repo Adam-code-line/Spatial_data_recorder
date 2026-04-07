@@ -128,6 +128,8 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
 
   /// 样例与 Spectacular 常用：米/灰度量化（仅作语义对齐；实际深度以 Float 录制为准）
   private let jsonDepthScale: Double = 0.001
+  private static let depthVisualizationNearMeters: Float = 0.2
+  private static let depthVisualizationFarMeters: Float = 5.0
 
   private var frames2DirectoryURL: URL {
     outputDirectory.appendingPathComponent("frames2", isDirectory: true)
@@ -200,11 +202,10 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
 
   /// LiDAR：同步广角 RGB + 深度图（优先，与样例第二路 gray + depthScale 一致）
   private func configureDepthAndWideSession() -> Bool {
-    guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
-      return false
-    }
-
-    guard let format = Self.pickFormatWithDepth(device: device) else { return false }
+    guard let selected = Self.pickDepthDeviceAndFormats() else { return false }
+    let device = selected.device
+    let format = selected.videoFormat
+    let depthFormat = selected.depthFormat
 
     let session = AVCaptureSession()
     session.beginConfiguration()
@@ -213,6 +214,9 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     do {
       try device.lockForConfiguration()
       device.activeFormat = format
+      if let depthFormat {
+        device.activeDepthDataFormat = depthFormat
+      }
       Self.disableHdrIfPossible(device: device)
       device.unlockForConfiguration()
     } catch {
@@ -233,7 +237,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     vOut.alwaysDiscardsLateVideoFrames = true
 
     let dOut = AVCaptureDepthDataOutput()
-    dOut.isFilteringEnabled = true
+    dOut.isFilteringEnabled = false
     dOut.alwaysDiscardsLateDepthData = true
 
     guard session.canAddOutput(vOut), session.canAddOutput(dOut) else {
@@ -293,6 +297,76 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       }
     }
     return best
+  }
+
+  private static func pickDepthDataFormat(for videoFormat: AVCaptureDevice.Format) -> AVCaptureDevice.Format? {
+    var best: AVCaptureDevice.Format?
+    var bestScore = Int64.min
+
+    for depthFormat in videoFormat.supportedDepthDataFormats {
+      let depthDesc = depthFormat.formatDescription
+      let dim = depthDesc.dimensions
+      let area = Int64(dim.width) * Int64(dim.height)
+      let subtype = CMFormatDescriptionGetMediaSubType(depthDesc)
+
+      let precisionScore: Int64
+      switch subtype {
+      case kCVPixelFormatType_DepthFloat32:
+        precisionScore = 4
+      case kCVPixelFormatType_DepthFloat16:
+        precisionScore = 3
+      case kCVPixelFormatType_DisparityFloat32:
+        precisionScore = 2
+      case kCVPixelFormatType_DisparityFloat16:
+        precisionScore = 1
+      default:
+        precisionScore = 0
+      }
+
+      let score = precisionScore * 1_000_000 + area
+      if score > bestScore {
+        bestScore = score
+        best = depthFormat
+      }
+    }
+
+    return best
+  }
+
+  private static func pickDepthDeviceAndFormats() -> (
+    device: AVCaptureDevice,
+    videoFormat: AVCaptureDevice.Format,
+    depthFormat: AVCaptureDevice.Format?
+  )? {
+    var preferredTypes: [AVCaptureDevice.DeviceType] = []
+    if #available(iOS 15.4, *) {
+      preferredTypes.append(.builtInLiDARDepthCamera)
+    }
+    preferredTypes.append(contentsOf: [
+      .builtInTripleCamera,
+      .builtInDualWideCamera,
+      .builtInDualCamera,
+      .builtInWideAngleCamera,
+    ])
+
+    let discovery = AVCaptureDevice.DiscoverySession(
+      deviceTypes: preferredTypes,
+      mediaType: .video,
+      position: .back
+    )
+
+    for type in preferredTypes {
+      guard let device = discovery.devices.first(where: { $0.deviceType == type }) else {
+        continue
+      }
+      guard let videoFormat = pickFormatWithDepth(device: device) else {
+        continue
+      }
+      let depthFormat = pickDepthDataFormat(for: videoFormat)
+      return (device, videoFormat, depthFormat)
+    }
+
+    return nil
   }
 
   private static func disableHdrIfPossible(device: AVCaptureDevice) {
@@ -510,25 +584,15 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
 
     guard let base = CVPixelBufferGetBaseAddress(depthMap) else { return nil }
     let rowBytes = CVPixelBufferGetBytesPerRow(depthMap)
+    let nearMeters = Self.depthVisualizationNearMeters
+    let farMeters = max(nearMeters + 0.001, Self.depthVisualizationFarMeters)
+    let invRange: Float = 1.0 / (farMeters - nearMeters)
 
     func readDepth(x: Int, y: Int) -> Float {
       let o = y * rowBytes + x * MemoryLayout<Float>.size
       guard pf == kCVPixelFormatType_DepthFloat32 else { return .nan }
       return base.load(fromByteOffset: o, as: Float.self)
     }
-
-    var minV: Float = .greatestFiniteMagnitude
-    var maxV: Float = -.greatestFiniteMagnitude
-    for y in 0..<h {
-      for x in 0..<w {
-        let v = readDepth(x: x, y: y)
-        if v.isFinite {
-          minV = min(minV, v)
-          maxV = max(maxV, v)
-        }
-      }
-    }
-    let range = max(maxV - minV, 1e-4)
 
     var outBuf: CVPixelBuffer?
     let attrs: [CFString: Any] = [
@@ -554,9 +618,11 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       for x in 0..<w {
         let v = readDepth(x: x, y: y)
         let g: UInt8
-        if v.isFinite {
-          let n = (v - minV) / range
-          g = UInt8(min(255, max(0, n * 255)))
+        if v.isFinite, v > 0 {
+          let clamped = min(max(v, nearMeters), farMeters)
+          let normalized = ((farMeters - clamped) * invRange).clamped(to: 0...1)
+          let emphasized = normalized.squareRoot()
+          g = UInt8(min(255, max(0, emphasized * 255)))
         } else {
           g = 0
         }
@@ -729,18 +795,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       return
     }
 
-    let sourceImage = CIImage(cvPixelBuffer: pixelBuffer)
-    let pngImage: CIImage
-    if captureMode == .multiCamRgb {
-      // MultiCam fallback has RGB second stream; convert to grayscale PNG sequence
-      // to keep frames2 output shape aligned with sample data.
-      pngImage = sourceImage.applyingFilter(
-        "CIColorControls",
-        parameters: [kCIInputSaturationKey: 0.0]
-      )
-    } else {
-      pngImage = sourceImage
-    }
+    let pngImage = CIImage(cvPixelBuffer: pixelBuffer)
 
     guard let cgImage = ciContext.createCGImage(pngImage, from: pngImage.extent) else {
       return
@@ -1386,5 +1441,11 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       return UIDevice.current.model
     }
     return String(cString: buf)
+  }
+}
+
+private extension Comparable {
+  func clamped(to limits: ClosedRange<Self>) -> Self {
+    min(max(self, limits.lowerBound), limits.upperBound)
   }
 }
