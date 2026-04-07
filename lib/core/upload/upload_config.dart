@@ -1,3 +1,5 @@
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+
 class UploadConfig {
   const UploadConfig({
     required this.baseUrl,
@@ -54,8 +56,64 @@ class UploadConfig {
   }
 }
 
-const defaultUploadConfig = UploadConfig(
-  // 占位地址，后续接入服务器时仅需替换这里或通过 Provider 覆盖。
-  baseUrl: 'http://1080.alpen-y.top:8080',
-  uploadPath: '/api/v1/slam/upload',
+String _requireEnv(String key) {
+  final value = dotenv.env[key]?.trim();
+  if (value == null || value.isEmpty) {
+    throw StateError('缺少环境变量: $key');
+  }
+  return value;
+}
+
+Duration _durationSecondsEnv(String key, Duration fallback) {
+  final raw = dotenv.env[key]?.trim();
+  if (raw == null || raw.isEmpty) {
+    return fallback;
+  }
+  final parsed = int.tryParse(raw);
+  if (parsed == null || parsed < 0) {
+    return fallback;
+  }
+  return Duration(seconds: parsed);
+}
+
+int _intEnv(String key, int fallback) {
+  final raw = dotenv.env[key]?.trim();
+  if (raw == null || raw.isEmpty) {
+    return fallback;
+  }
+  final parsed = int.tryParse(raw);
+  if (parsed == null || parsed < 0) {
+    return fallback;
+  }
+  return parsed;
+}
+
+String _uploadBaseUrlFromEnv() => _requireEnv('UPLOAD_BASE_URL');
+String _uploadPathFromEnv() => _requireEnv('UPLOAD_PATH');
+String _uploadTokenFromEnv() => _requireEnv('UPLOAD_AUTH_TOKEN');
+
+UploadConfig get defaultUploadConfig => UploadConfig(
+  baseUrl: _uploadBaseUrlFromEnv(),
+  uploadPath: _uploadPathFromEnv(),
+  connectTimeout: _durationSecondsEnv(
+    'UPLOAD_CONNECT_TIMEOUT_SECONDS',
+    const Duration(seconds: 10),
+  ),
+  sendTimeout: _durationSecondsEnv(
+    'UPLOAD_SEND_TIMEOUT_SECONDS',
+    const Duration(minutes: 10),
+  ),
+  receiveTimeout: _durationSecondsEnv(
+    'UPLOAD_RECEIVE_TIMEOUT_SECONDS',
+    const Duration(seconds: 60),
+  ),
+  extraHeaders: <String, String>{
+    'Authorization': 'Bearer ${_uploadTokenFromEnv()}',
+  },
+  maxRetryAttempts: _intEnv('UPLOAD_MAX_RETRY_ATTEMPTS', 3),
+  retryBaseDelay: _durationSecondsEnv(
+    'UPLOAD_RETRY_BASE_DELAY_SECONDS',
+    const Duration(seconds: 2),
+  ),
+  maxHistoryItems: _intEnv('UPLOAD_MAX_HISTORY_ITEMS', 40),
 );

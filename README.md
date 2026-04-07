@@ -2,6 +2,21 @@
 
 A new Flutter project.
 
+## Upload Environment Config
+
+Upload settings are read from `.env` at runtime. The app no longer hardcodes
+backend URL or auth token.
+
+1. Copy `.env.example` to `.env`.
+2. Update `UPLOAD_BASE_URL` and `UPLOAD_AUTH_TOKEN`.
+3. Ensure backend `AUTH_TOKENS` uses the same token value.
+
+Required keys:
+
+- `UPLOAD_BASE_URL`
+- `UPLOAD_PATH`
+- `UPLOAD_AUTH_TOKEN`
+
 ## Getting Started
 
 This project is a starting point for a Flutter application.
