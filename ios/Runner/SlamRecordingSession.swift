@@ -1174,6 +1174,16 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     pendingJsonl.removeAll()
   }
 
+  private func hasNonEmptyPrimaryMovie() -> Bool {
+    let movieURL = outputDirectory.appendingPathComponent("data.mov")
+    guard let attrs = try? FileManager.default.attributesOfItem(atPath: movieURL.path),
+          let size = attrs[.size] as? NSNumber
+    else {
+      return false
+    }
+    return size.int64Value > 0
+  }
+
   func stop(completion: @escaping (Result<URL, Error>) -> Void) {
     syncQueue.async { [weak self] in
       self?.performStop(completion: completion)
@@ -1246,11 +1256,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       }
 
       if writer.status == .failed {
-        let movieURL = outputDirectory.appendingPathComponent("data.mov")
-        if let attrs = try? FileManager.default.attributesOfItem(atPath: movieURL.path),
-           let size = attrs[.size] as? NSNumber,
-           size.int64Value > 0
-        {
+        if hasNonEmptyPrimaryMovie() {
           finishOne()
           return
         }
@@ -1268,6 +1274,10 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
         guard let self = self else { return }
         self.syncQueue.async {
           if writer.status == .failed {
+            if self.hasNonEmptyPrimaryMovie() {
+              finishOne()
+              return
+            }
             self.assetWriter = nil
             self.videoInput = nil
             self.assetWriter2 = nil

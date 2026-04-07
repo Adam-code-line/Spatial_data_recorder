@@ -118,18 +118,32 @@ final class RecorderFlutterBridge {
         return
       }
       s.stop { [weak self] res in
-        self?.session = nil
-        self?.notifySessionChanged()
-        self?.previewController.start(requestPermission: false) { ok in
-          if ok {
-            self?.notifySessionChanged()
-          }
-        }
+        guard let self = self else { return }
         switch res {
         case .success(let url):
-          self?.lastCompletedSessionPath = url.path
+          self.session = nil
+          self.notifySessionChanged()
+          self.previewController.start(requestPermission: false) { [weak self] ok in
+            if ok {
+              self?.notifySessionChanged()
+            }
+          }
+          self.lastCompletedSessionPath = url.path
           result(url.path)
         case .failure(let err):
+          // If native stop already tore down capture session, allow user to start
+          // a new recording even when writer finalization failed.
+          if s.currentCaptureSession == nil {
+            self.session = nil
+            self.notifySessionChanged()
+            self.previewController.start(requestPermission: false) { [weak self] ok in
+              if ok {
+                self?.notifySessionChanged()
+              }
+            }
+          } else {
+            self.notifySessionChanged()
+          }
           result(
             FlutterError(
               code: "stop_failed",

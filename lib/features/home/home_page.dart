@@ -138,6 +138,7 @@ class _HomePageState extends ConsumerState<HomePage> {
         _toast('已停止录制，$uploadMessage');
       }
     } catch (e) {
+      await _refreshStatus();
       _toast('停止录制失败：$e');
     } finally {
       if (mounted) {
