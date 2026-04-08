@@ -10,6 +10,7 @@ final class RecorderFlutterBridge {
   private let previewController = CameraPreviewController()
   private var session: SlamRecordingSession?
   private var lastCompletedSessionPath: String?
+  private var didConsumeWarmupTrial = false
 
   init(messenger: FlutterBinaryMessenger) {
     self.messenger = messenger
@@ -19,6 +20,14 @@ final class RecorderFlutterBridge {
     DispatchQueue.main.async {
       NotificationCenter.default.post(name: Self.sessionDidChangeNotification, object: nil)
     }
+  }
+
+  private static func shouldTreatAsWarmupTrial(_ error: Error) -> Bool {
+    guard let recordingError = error as? SlamRecordingError else { return false }
+    guard case .writerSetupFailed(let message) = recordingError else { return false }
+    return message.contains("domain=AVFoundationErrorDomain")
+      && message.contains("code=-11800")
+      && message.contains("underlyingCode=-12780")
   }
 
   func currentCaptureSession() -> AVCaptureSession? {
@@ -131,6 +140,20 @@ final class RecorderFlutterBridge {
           self.lastCompletedSessionPath = url.path
           result(url.path)
         case .failure(let err):
+          if !self.didConsumeWarmupTrial, Self.shouldTreatAsWarmupTrial(err) {
+            self.didConsumeWarmupTrial = true
+            self.session = nil
+            self.notifySessionChanged()
+            self.previewController.start(requestPermission: false) { [weak self] ok in
+              if ok {
+                self?.notifySessionChanged()
+              }
+            }
+            try? FileManager.default.removeItem(at: s.outputDirectory)
+            result("")
+            return
+          }
+
           // If native stop already tore down capture session, allow user to start
           // a new recording even when writer finalization failed.
           if s.currentCaptureSession == nil {

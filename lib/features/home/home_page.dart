@@ -147,6 +147,14 @@ class _HomePageState extends ConsumerState<HomePage> {
           .read(recorderPlatformProvider)
           .stopRecording();
 
+      if (sessionPath.isEmpty) {
+        await _refreshStatus();
+        if (mounted) {
+          _toast('首轮录制已作为预热，请再次点击开始录制。');
+        }
+        return;
+      }
+
       var uploadMessage = '上传任务状态未知。';
       try {
         final enqueueResult = await ref
