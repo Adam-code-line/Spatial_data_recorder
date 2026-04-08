@@ -1321,7 +1321,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
           return
         }
 
-        if Self.isTransientFinalizeError(writer.error) {
+        if SlamRecordingError.isTransientFinalizeError(writer.error) {
           syncQueue.asyncAfter(deadline: .now() + 0.2) { [weak self] in
             guard let self = self else { return }
             if self.hasNonEmptyPrimaryMovie() {
@@ -1355,7 +1355,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
               return
             }
 
-            if Self.isTransientFinalizeError(writer.error) {
+            if SlamRecordingError.isTransientFinalizeError(writer.error) {
               self.syncQueue.asyncAfter(deadline: .now() + 0.2) {
                 if self.hasNonEmptyPrimaryMovie() {
                   finishOne()
