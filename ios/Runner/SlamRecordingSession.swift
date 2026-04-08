@@ -38,6 +38,17 @@ enum SlamRecordingError: LocalizedError {
     return .writerSetupFailed(details.joined(separator: " "))
   }
 
+  static func isTransientFinalizeError(_ error: Error?) -> Bool {
+    guard let nsError = error as NSError? else { return false }
+    guard nsError.domain == AVFoundationErrorDomain, nsError.code == -11800 else {
+      return false
+    }
+    if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
+      return underlying.domain == NSOSStatusErrorDomain && underlying.code == -12780
+    }
+    return false
+  }
+
   var errorDescription: String? {
     switch self {
     case .simulatorNotSupported:
@@ -191,6 +202,17 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
   // MARK: - Session setup
 
   private func configureCaptureAndRun(completion: @escaping (Error?) -> Void) {
+    isStopping = false
+    didStartWriter = false
+    firstVideoPts = nil
+    frameIndex = 0
+    timeOriginMedia = 0
+    assetWriter = nil
+    videoInput = nil
+    assetWriter2 = nil
+    videoInput2 = nil
+    pendingJsonl.removeAll(keepingCapacity: true)
+
     if configureDepthAndWideSession() {
       captureMode = .depthAndWide
     } else if configureMultiCamSession() {
@@ -1262,12 +1284,6 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     let finishOne: () -> Void = { [weak self] in
       guard let self = self else { return }
       if let input2 = self.videoInput2, let w2 = self.assetWriter2, self.didStartWriter {
-        if let lastPts2 = self.lastSecondaryWrittenPts,
-           let firstPts = self.firstVideoPts,
-           CMTimeCompare(lastPts2, firstPts) > 0
-        {
-          w2.endSession(atSourceTime: lastPts2)
-        }
         input2.markAsFinished()
         w2.finishWriting { [weak self] in
           guard let self = self else { return }
@@ -1299,13 +1315,25 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
         return
       }
 
-      if let firstPts = firstVideoPts, CMTimeCompare(lastPts, firstPts) > 0 {
-        writer.endSession(atSourceTime: lastPts)
-      }
-
       if writer.status == .failed {
         if hasNonEmptyPrimaryMovie() {
           finishOne()
+          return
+        }
+
+        if Self.isTransientFinalizeError(writer.error) {
+          syncQueue.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self = self else { return }
+            if self.hasNonEmptyPrimaryMovie() {
+              finishOne()
+              return
+            }
+            let err = SlamRecordingError.wrapWriterError(writer.error)
+            DispatchQueue.main.async {
+              UIApplication.shared.isIdleTimerDisabled = false
+              completion(.failure(err))
+            }
+          }
           return
         }
 
@@ -1326,6 +1354,26 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
               finishOne()
               return
             }
+
+            if Self.isTransientFinalizeError(writer.error) {
+              self.syncQueue.asyncAfter(deadline: .now() + 0.2) {
+                if self.hasNonEmptyPrimaryMovie() {
+                  finishOne()
+                  return
+                }
+                self.assetWriter = nil
+                self.videoInput = nil
+                self.assetWriter2 = nil
+                self.videoInput2 = nil
+                let err = SlamRecordingError.wrapWriterError(writer.error)
+                DispatchQueue.main.async {
+                  UIApplication.shared.isIdleTimerDisabled = false
+                  completion(.failure(err))
+                }
+              }
+              return
+            }
+
             self.assetWriter = nil
             self.videoInput = nil
             self.assetWriter2 = nil
