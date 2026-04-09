@@ -12,7 +12,7 @@
 
 1. 主应用 Bundle ID（Runner）已是 `com.momax.cap`。
 2. 测试 Target Bundle ID（RunnerTests）已是 `com.momax.cap.RunnerTests`。
-3. `DEVELOPMENT_TEAM` 仍是旧 Team ID：`28XXZQ95P6`（需要替换为你公司团队对应的 Team ID）。
+3. `DEVELOPMENT_TEAM` 仍是旧 Team ID：`28XXZQ95P6`（需要替换为你公司团队对应的 Team ID`9AZ652M3G3`）。
 4. 项目使用 Automatic Signing（`CODE_SIGN_STYLE = Automatic`），可继续沿用。
 
 ## 3. Runner 中需要替换的内容
