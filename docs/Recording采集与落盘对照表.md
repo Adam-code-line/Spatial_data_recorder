@@ -5,8 +5,8 @@
 | 设备/API 能采到的                  | 当前 recording 里实际有的                                                                                                             |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | 主相机视频帧（经编码管线）         | `data.mov`（H.264，无麦克风轨）                                                                                                       |
-| 第二路视频（深度灰度或超广角 RGB） | **`data2.mov`**（若设备/会话支持双路）：深度模式为 **深度→8bit 灰度**；否则 **超广角 RGB**；见 `metadata.dual_capture_mode`           |
-| 深度逐帧可视化                     | 深度模式下导出 **`frames2/*.png`**（8 位补零命名，如 `00000000.png`），与样例目录结构一致                                             |
+| 第二路视频（深度灰度或超广角 RGB） | 不再写入 `data2.mov`；第二路以 `frames2/*.png`（像素导出）+ `data.jsonl` 的 `frames[1]`（语义与标定）表示；见 `metadata.dual_capture_mode` |
+| 第二路逐帧导出                     | 双路模式下导出 **`frames2/*.png`**（8 位补零命名，如 `00000000.png`）                                                                |
 | 陀螺仪角速度 `rotationRate`        | `data.jsonl`：`sensor.type: gyroscope`（**rad/s**）                                                                                   |
 | 重力 + 用户加速度合成的三轴加速度  | `data.jsonl`：`sensor.type: accelerometer`（**m/s²**，含重力）                                                                        |
 | 磁力计磁场                         | `data.jsonl`：`sensor.type: magnetometer`（**μT**）                                                                                   |
@@ -18,8 +18,10 @@
 | 缓冲刷盘                           | 结束时一次写入 `data.jsonl`                                                                                                           |
 | 对焦 / 曝光（及白平衡）稳定        | 会话开始约 **0.2 s** 后链式锁定（仅作用于**广角**设备）                                                                               |
 | 机型代号 `hw.machine`              | `metadata.json`：`device_model`                                                                                                       |
-| —                                  | `metadata.json`：`platform`、`imu_temperature_status`、`intrinsics_source`、`p1`、`spectacular_sample_alignment`、`dual_capture_mode` |
+| —                                  | `metadata.json`：`platform`、`imu_temperature_status`、`intrinsics_source`、`p1`、`spectacular_sample_alignment`、`dual_capture_mode`（如 `depth_gray_frames2` / `wide_ultrawide_rgb_frames2` / `single_wide`） |
 | IMU 芯片温度（Spectacular 可选）   | **不写入** JSONL                                                                                                                      |
-| 原始 Float 深度文件（非视频）      | **不写入**（`data2` 为灰度可视化 H.264）                                                                                              |
+| 原始 Float 深度文件（非视频）      | **不写入**（同时不再落盘 `data2.mov`）                                                                                                |
 | 精确畸变系数 / 查找表              | **未写入** `calibration.json`                                                                                                         |
 | 真实 IMU→相机外参（需标定）        | `calibration.json`：主路为拍摄期坐标系约定矩阵；深度模式第二路优先由 `extrinsicMatrix` 组合估计（仍非标定真值）                       |
+
+补充：上传链路当前要求 `frames2` 目录存在且至少包含 1 个文件；缺失会在上传前校验阶段报错。
