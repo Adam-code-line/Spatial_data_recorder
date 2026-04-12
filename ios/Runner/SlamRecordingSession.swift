@@ -155,6 +155,8 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
   private let jsonDepthScale: Double = 0.001
   private static let depthVisualizationNearMeters: Float = 0.2
   private static let depthVisualizationFarMeters: Float = 5.0
+  private static let targetVideoWidth = 1920
+  private static let targetVideoHeight = 1440
 
   private var frames2DirectoryURL: URL {
     outputDirectory.appendingPathComponent("frames2", isDirectory: true)
@@ -312,36 +314,53 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     return true
   }
 
-  private static func pickFormatWithDepth(device: AVCaptureDevice) -> AVCaptureDevice.Format? {
+  private static func isTargetResolution(_ dimensions: CMVideoDimensions) -> Bool {
+    let width = Int(dimensions.width)
+    let height = Int(dimensions.height)
+    return isTargetResolution(width: width, height: height)
+  }
+
+  private static func isTargetResolution(width: Int, height: Int) -> Bool {
+    (width == targetVideoWidth && height == targetVideoHeight)
+      || (width == targetVideoHeight && height == targetVideoWidth)
+  }
+
+  private static func colorPreferenceScore(_ subtype: OSType) -> Int64 {
+    switch subtype {
+    case kCVPixelFormatType_420YpCbCr8BiPlanarFullRange:
+      return 3
+    case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange:
+      return 2
+    default:
+      return 0
+    }
+  }
+
+  private static func pickPreferredVideoFormat(device: AVCaptureDevice, requireDepth: Bool) -> AVCaptureDevice.Format? {
     var best: AVCaptureDevice.Format?
     var bestScore = Int64.min
 
     for format in device.formats {
-      if format.supportedDepthDataFormats.isEmpty { continue }
-
-      let dim = format.formatDescription.dimensions
-      let area = Int64(dim.width) * Int64(dim.height)
-      let subtype = CMFormatDescriptionGetMediaSubType(format.formatDescription)
-
-      // Prefer standard 8-bit YUV (SDR-friendly) to avoid washed-looking video.
-      let colorScore: Int64
-      switch subtype {
-      case kCVPixelFormatType_420YpCbCr8BiPlanarFullRange:
-        colorScore = 3
-      case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange:
-        colorScore = 2
-      default:
-        colorScore = 0
+      if requireDepth && format.supportedDepthDataFormats.isEmpty {
+        continue
       }
 
-      let hdrPenalty: Int64 = format.isVideoHDRSupported ? -1 : 0
-      let score = colorScore * 1_000_000_000 + area * 1_000 + hdrPenalty
+      let dim = format.formatDescription.dimensions
+      guard isTargetResolution(dim) else {
+        continue
+      }
+
+      let subtype = CMFormatDescriptionGetMediaSubType(format.formatDescription)
+      let colorScore = colorPreferenceScore(subtype)
+      let hdrPenalty: Int64 = format.isVideoHDRSupported ? 1 : 0
+      let score = colorScore * 10 - hdrPenalty
 
       if score > bestScore {
         bestScore = score
         best = format
       }
     }
+
     return best
   }
 
@@ -405,7 +424,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       guard let device = discovery.devices.first(where: { $0.deviceType == type }) else {
         continue
       }
-      guard let videoFormat = pickFormatWithDepth(device: device) else {
+      guard let videoFormat = pickPreferredVideoFormat(device: device, requireDepth: true) else {
         continue
       }
       let depthFormat = pickDepthDataFormat(for: videoFormat)
@@ -432,8 +451,16 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     }
     guard AVCaptureMultiCamSession.isMultiCamSupported else { return false }
 
+    guard
+      let wideFormat = Self.pickPreferredVideoFormat(device: wide, requireDepth: false),
+      let ultraFormat = Self.pickPreferredVideoFormat(device: ultra, requireDepth: false)
+    else {
+      return false
+    }
+
     do {
       try wide.lockForConfiguration()
+      wide.activeFormat = wideFormat
       Self.disableHdrIfPossible(device: wide)
       wide.unlockForConfiguration()
     } catch {
@@ -442,6 +469,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
 
     do {
       try ultra.lockForConfiguration()
+      ultra.activeFormat = ultraFormat
       Self.disableHdrIfPossible(device: ultra)
       ultra.unlockForConfiguration()
     } catch {
@@ -513,8 +541,13 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       return false
     }
 
+    guard let preferredFormat = Self.pickPreferredVideoFormat(device: device, requireDepth: false) else {
+      return false
+    }
+
     do {
       try device.lockForConfiguration()
+      device.activeFormat = preferredFormat
       Self.disableHdrIfPossible(device: device)
       device.unlockForConfiguration()
     } catch {
@@ -932,6 +965,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return false }
     let width = CVPixelBufferGetWidth(pixelBuffer)
     let height = CVPixelBufferGetHeight(pixelBuffer)
+    guard Self.isTargetResolution(width: width, height: height) else { return false }
     videoWidth = width
     videoHeight = height
 
