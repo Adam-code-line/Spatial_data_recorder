@@ -38,17 +38,6 @@ enum SlamRecordingError: LocalizedError {
     return .writerSetupFailed(details.joined(separator: " "))
   }
 
-  static func isTransientFinalizeError(_ error: Error?) -> Bool {
-    guard let nsError = error as NSError? else { return false }
-    guard nsError.domain == AVFoundationErrorDomain, nsError.code == -11800 else {
-      return false
-    }
-    if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
-      return underlying.domain == NSOSStatusErrorDomain && underlying.code == -12780
-    }
-    return false
-  }
-
   var errorDescription: String? {
     switch self {
     case .simulatorNotSupported:
@@ -83,15 +72,15 @@ private struct PendingJsonlLine {
 
 /// 采集模式：LiDAR 深度 + 广角 RGB（样例风格第二路 gray+depthScale）、或 MultiCam 广角+超广角双 RGB、或单广角。
 private enum DualCaptureMode {
-  /// `data.mov` 广角 RGB + `frames2/*.png` 深度图转灰度（`colorFormat: gray`、`depthScale`）
+  /// `data.mov` 广角 RGB + `data2.mov` 深度图转灰度（`colorFormat: gray`、`depthScale`）
   case depthAndWide
-  /// `data.mov` 广角 + `frames2/*.png` 超广角 RGB（无 LiDAR 时回退）
+  /// `data.mov` 广角 + `data2.mov` 超广角 RGB（无 LiDAR 时回退）
   case multiCamRgb
   /// 仅广角（配置失败时）
   case singleWide
 }
 
-/// Spectacular 风格：`data.mov` + 必需 `frames2/*.png`，JSONL 双 `frames`；IMU 与 P1 行为保留。
+/// Spectacular 风格：`data.mov` / `data2.mov` + JSONL 双 `frames`；IMU 与 P1 行为保留。
 final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDelegate,
   AVCaptureVideoDataOutputSampleBufferDelegate
 {
@@ -224,14 +213,12 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       return
     }
 
-    // Keep frames2/*.png in all dual-stream modes so uploaded session layout
-    // stays aligned with the sample structure.
-    shouldExportFrames2PngSequence = captureMode != .singleWide
     lastDepthToWideExtrinsic = nil
     lastPrimaryImuToCameraSource = "capture_convention_back_camera_axes"
     lastSecondaryImuToCameraSource = "not_applicable_single_camera"
     lastPrimaryWrittenPts = nil
     lastSecondaryWrittenPts = nil
+    shouldExportFrames2PngSequence = captureMode != .singleWide
     prepareFrames2DirectoryIfNeeded()
 
     captureSession?.startRunning()
@@ -246,6 +233,16 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
         self?.applyFocusExposureLockIfPossible()
       }
       completion(nil)
+    }
+  }
+
+  private func prepareFrames2DirectoryIfNeeded() {
+    let fm = FileManager.default
+    if shouldExportFrames2PngSequence {
+      try? fm.removeItem(at: frames2DirectoryURL)
+      try? fm.createDirectory(at: frames2DirectoryURL, withIntermediateDirectories: true)
+    } else {
+      try? fm.removeItem(at: frames2DirectoryURL)
     }
   }
 
@@ -555,16 +552,6 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     return true
   }
 
-  private func prepareFrames2DirectoryIfNeeded() {
-    let fm = FileManager.default
-    if shouldExportFrames2PngSequence {
-      try? fm.removeItem(at: frames2DirectoryURL)
-      try? fm.createDirectory(at: frames2DirectoryURL, withIntermediateDirectories: true)
-    } else {
-      try? fm.removeItem(at: frames2DirectoryURL)
-    }
-  }
-
   // MARK: - AVCaptureDataOutputSynchronizerDelegate（深度 + 广角）
 
   func dataOutputSynchronizer(
@@ -620,7 +607,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     processVideoSampleBuffer(sampleBuffer, secondSample: sb2, depthCalibration: depthData.cameraCalibrationData)
   }
 
-  /// 将深度图转为 BGRA8，用于导出 `frames2/*.png`
+  /// 将深度图转为 BGRA8，用于写入 `data2.mov`。
   private static func depthFloat32ToGrayBGRA(depthData: AVDepthData) -> CVPixelBuffer? {
     let converted = depthData.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32)
     let depthMap = converted.depthDataMap
@@ -798,7 +785,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     let hasSecondWriter =
       captureMode != .singleWide && secondSample != nil && assetWriter2 != nil && videoInput2 != nil
     let canAppendSecond = hasSecondWriter && (videoInput2?.isReadyForMoreMediaData ?? false)
-    let secondSampleForThisFrame = secondSample
+    let secondSampleForThisFrame = hasSecondWriter ? secondSample : nil
 
     if !didStartWriter {
       writer.startSession(atSourceTime: primaryPts)
@@ -986,16 +973,57 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       let h2 = CVPixelBufferGetHeight(pb2)
       videoWidth2 = w2
       videoHeight2 = h2
+
+      let movie2URL = outputDirectory.appendingPathComponent("data2.mov")
+      try? FileManager.default.removeItem(at: movie2URL)
+
+      do {
+        let writer2 = try AVAssetWriter(outputURL: movie2URL, fileType: .mov)
+        let videoSettings2: [String: Any] = [
+          AVVideoCodecKey: AVVideoCodecType.h264,
+          AVVideoWidthKey: w2,
+          AVVideoHeightKey: h2,
+          AVVideoCompressionPropertiesKey: [
+            AVVideoAverageBitRateKey: w2 * h2 * 4,
+            AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
+            AVVideoMaxKeyFrameIntervalKey: 60,
+          ] as [String: Any],
+        ]
+
+        let input2 = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings2)
+        input2.expectsMediaDataInRealTime = true
+
+        guard writer2.canAdd(input2) else {
+          assetWriter?.cancelWriting()
+          assetWriter = nil
+          videoInput = nil
+          return false
+        }
+        writer2.add(input2)
+        guard writer2.startWriting() else {
+          writer2.cancelWriting()
+          assetWriter?.cancelWriting()
+          assetWriter = nil
+          videoInput = nil
+          return false
+        }
+
+        assetWriter2 = writer2
+        videoInput2 = input2
+      } catch {
+        assetWriter?.cancelWriting()
+        assetWriter = nil
+        videoInput = nil
+        return false
+      }
     } else {
       videoWidth2 = 0
       videoHeight2 = 0
+      let movie2URL = outputDirectory.appendingPathComponent("data2.mov")
+      try? FileManager.default.removeItem(at: movie2URL)
+      assetWriter2 = nil
+      videoInput2 = nil
     }
-
-    // data2.mov is no longer recorded. Keep only frames2 sequence for the second stream.
-    let movie2URL = outputDirectory.appendingPathComponent("data2.mov")
-    try? FileManager.default.removeItem(at: movie2URL)
-    assetWriter2 = nil
-    videoInput2 = nil
 
     return true
   }
@@ -1204,14 +1232,27 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     pendingJsonl.removeAll()
   }
 
-  private func hasNonEmptyPrimaryMovie() -> Bool {
+  private static func videoResolution(from url: URL) -> CGSize? {
+    guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+    let asset = AVURLAsset(url: url)
+    guard let track = asset.tracks(withMediaType: .video).first else { return nil }
+    let transformed = track.naturalSize.applying(track.preferredTransform)
+    let width = abs(transformed.width)
+    let height = abs(transformed.height)
+    guard width > 0, height > 0 else { return nil }
+    return CGSize(width: width, height: height)
+  }
+
+  private func hasValidRecordedVideos() -> Bool {
     let movieURL = outputDirectory.appendingPathComponent("data.mov")
-    guard let attrs = try? FileManager.default.attributesOfItem(atPath: movieURL.path),
-          let size = attrs[.size] as? NSNumber
-    else {
-      return false
+    guard Self.videoResolution(from: movieURL) != nil else { return false }
+
+    if videoWidth2 > 0, videoHeight2 > 0 {
+      let movie2URL = outputDirectory.appendingPathComponent("data2.mov")
+      guard Self.videoResolution(from: movie2URL) != nil else { return false }
     }
-    return size.int64Value > 0
+
+    return true
   }
 
   func stop(completion: @escaping (Result<URL, Error>) -> Void) {
@@ -1242,12 +1283,30 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
 
     writeSortedJsonlToDisk()
 
+    let finalizeFailure: (Error) -> Void = { [weak self] error in
+      guard let self = self else { return }
+      self.assetWriter = nil
+      self.videoInput = nil
+      self.assetWriter2 = nil
+      self.videoInput2 = nil
+
+      DispatchQueue.main.async {
+        UIApplication.shared.isIdleTimerDisabled = false
+        completion(.failure(error))
+      }
+    }
+
     let finalizeSuccess: () -> Void = { [weak self] in
       guard let self = self else { return }
       self.assetWriter = nil
       self.videoInput = nil
       self.assetWriter2 = nil
       self.videoInput2 = nil
+
+      guard self.hasValidRecordedVideos() else {
+        finalizeFailure(SlamRecordingError.writerSetupFailed("invalid_video_resolution_metadata"))
+        return
+      }
 
       self.writeCalibrationJson()
       self.writeMetadataJson()
@@ -1265,9 +1324,9 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
         w2.finishWriting { [weak self] in
           guard let self = self else { return }
           self.syncQueue.async {
-            if w2.status == .failed {
-              self.assetWriter2 = nil
-              self.videoInput2 = nil
+            guard w2.status == .completed else {
+              finalizeFailure(SlamRecordingError.wrapWriterError(w2.error))
+              return
             }
             finalizeSuccess()
           }
@@ -1288,37 +1347,12 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
         didStartWriter = false
         firstVideoPts = nil
         lastSecondaryWrittenPts = nil
-        finalizeSuccess()
+        finalizeFailure(SlamRecordingError.writerSetupFailed("no_video_samples_captured"))
         return
       }
 
       if writer.status == .failed {
-        if hasNonEmptyPrimaryMovie() {
-          finishOne()
-          return
-        }
-
-        if SlamRecordingError.isTransientFinalizeError(writer.error) {
-          syncQueue.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            guard let self = self else { return }
-            if self.hasNonEmptyPrimaryMovie() {
-              finishOne()
-              return
-            }
-            let err = SlamRecordingError.wrapWriterError(writer.error)
-            DispatchQueue.main.async {
-              UIApplication.shared.isIdleTimerDisabled = false
-              completion(.failure(err))
-            }
-          }
-          return
-        }
-
-        let err = SlamRecordingError.wrapWriterError(writer.error)
-        DispatchQueue.main.async {
-          UIApplication.shared.isIdleTimerDisabled = false
-          completion(.failure(err))
-        }
+        finalizeFailure(SlamRecordingError.wrapWriterError(writer.error))
         return
       }
 
@@ -1326,40 +1360,8 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       writer.finishWriting { [weak self] in
         guard let self = self else { return }
         self.syncQueue.async {
-          if writer.status == .failed {
-            if self.hasNonEmptyPrimaryMovie() {
-              finishOne()
-              return
-            }
-
-            if SlamRecordingError.isTransientFinalizeError(writer.error) {
-              self.syncQueue.asyncAfter(deadline: .now() + 0.2) {
-                if self.hasNonEmptyPrimaryMovie() {
-                  finishOne()
-                  return
-                }
-                self.assetWriter = nil
-                self.videoInput = nil
-                self.assetWriter2 = nil
-                self.videoInput2 = nil
-                let err = SlamRecordingError.wrapWriterError(writer.error)
-                DispatchQueue.main.async {
-                  UIApplication.shared.isIdleTimerDisabled = false
-                  completion(.failure(err))
-                }
-              }
-              return
-            }
-
-            self.assetWriter = nil
-            self.videoInput = nil
-            self.assetWriter2 = nil
-            self.videoInput2 = nil
-            let err = SlamRecordingError.wrapWriterError(writer.error)
-            DispatchQueue.main.async {
-              UIApplication.shared.isIdleTimerDisabled = false
-              completion(.failure(err))
-            }
+          guard writer.status == .completed else {
+            finalizeFailure(SlamRecordingError.wrapWriterError(writer.error))
             return
           }
           finishOne()
@@ -1370,7 +1372,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       videoInput = nil
       assetWriter2 = nil
       videoInput2 = nil
-      finalizeSuccess()
+      finalizeFailure(SlamRecordingError.writerSetupFailed("no_video_writer_started"))
     }
   }
 
@@ -1576,31 +1578,10 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
 
   private func writeMetadataJson() {
     let model = SlamRecordingSession.machineModelName()
-    var root: [String: Any] = [
+    let root: [String: Any] = [
       "device_model": model,
       "platform": "ios",
-      "imu_temperature_status": "unavailable_no_public_api_ios",
-      "intrinsics_source": didUpdateIntrinsicsFromSample ? "cmsamplebuffer_attachment" : "heuristic_fallback",
-      "dual_capture_mode": captureMode == .depthAndWide ? "depth_gray_frames2"
-        : captureMode == .multiCamRgb ? "wide_ultrawide_rgb_frames2" : "single_wide",
     ]
-    root["p1"] = [
-      "jsonl_sorted_by_time": true,
-      "focus_exposure_locked_after_delay_s": 0.2,
-    ] as [String: Any]
-    root["spectacular_sample_alignment"] = [
-      "magnetometer_jsonl": true,
-      "per_frame_calibration_rgb": true,
-      "dual_camera_data2": false,
-      "data2_mov_recorded": false,
-      "frames2_png_sequence": shouldExportFrames2PngSequence,
-      "imu_temperature_jsonl": false,
-    ] as [String: Any]
-    root["calibration_capture_sources"] = [
-      "imu_to_camera_primary": lastPrimaryImuToCameraSource,
-      "imu_to_camera_secondary": lastSecondaryImuToCameraSource,
-      "depth_to_wide_extrinsic_available": lastDepthToWideExtrinsic != nil,
-    ] as [String: Any]
     writeJsonFile(name: "metadata.json", object: root)
   }
 
