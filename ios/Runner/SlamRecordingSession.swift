@@ -222,7 +222,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     lastPrimaryWrittenPts = nil
     lastSecondaryWrittenPts = nil
     isSecondaryRecordingEnabled = captureMode != .singleWide
-    shouldExportFrames2PngSequence = isSecondaryRecordingEnabled
+    shouldExportFrames2PngSequence = true
     prepareFrames2DirectoryIfNeeded()
 
     captureSession?.startRunning()
@@ -872,7 +872,11 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
         isDepthGray: captureMode == .depthAndWide,
         depthCalibration: depthCalibration
       )
-      exportFrames2PngIfNeeded(secondSample: secondSampleForThisFrame, frameNumber: frameIndex)
+      exportFrames2PngIfNeeded(
+        wideSample: sampleBuffer,
+        secondSample: secondSampleForThisFrame,
+        frameNumber: frameIndex
+      )
       frameIndex += 1
       return
     }
@@ -884,7 +888,11 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       isDepthGray: captureMode == .depthAndWide,
       depthCalibration: depthCalibration
     )
-    exportFrames2PngIfNeeded(secondSample: secondSampleForThisFrame, frameNumber: frameIndex)
+    exportFrames2PngIfNeeded(
+      wideSample: sampleBuffer,
+      secondSample: secondSampleForThisFrame,
+      frameNumber: frameIndex
+    )
     frameIndex += 1
     if input.append(sampleBuffer) {
       lastPrimaryWrittenPts = primaryPts
@@ -949,10 +957,14 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     return retimed
   }
 
-  private func exportFrames2PngIfNeeded(secondSample: CMSampleBuffer?, frameNumber: Int) {
+  private func exportFrames2PngIfNeeded(
+    wideSample: CMSampleBuffer,
+    secondSample: CMSampleBuffer?,
+    frameNumber: Int
+  ) {
+    let sampleToExport = secondSample ?? wideSample
     guard shouldExportFrames2PngSequence,
-          let sb2 = secondSample,
-          let pixelBuffer = CMSampleBufferGetImageBuffer(sb2)
+          let pixelBuffer = CMSampleBufferGetImageBuffer(sampleToExport)
     else {
       return
     }
@@ -1305,7 +1317,6 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       w2.cancelWriting()
     }
     isSecondaryRecordingEnabled = false
-    shouldExportFrames2PngSequence = false
     assetWriter2 = nil
     videoInput2 = nil
     videoWidth2 = 0
@@ -1314,7 +1325,6 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     prunePendingSecondaryFrameMetadata()
     let movie2URL = outputDirectory.appendingPathComponent("data2.mov")
     try? FileManager.default.removeItem(at: movie2URL)
-    try? FileManager.default.removeItem(at: frames2DirectoryURL)
   }
 
   private func hasValidRecordedVideos() -> Bool {
