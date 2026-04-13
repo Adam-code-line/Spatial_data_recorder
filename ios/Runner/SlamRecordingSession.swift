@@ -115,6 +115,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
 
   private var captureMode: DualCaptureMode = .singleWide
   private var shouldExportFrames2PngSequence = false
+  private var isSecondaryRecordingEnabled = false
 
   private var timeOriginMedia: CFTimeInterval = 0
   private var firstVideoPts: CMTime?
@@ -220,7 +221,8 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     lastSecondaryImuToCameraSource = "not_applicable_single_camera"
     lastPrimaryWrittenPts = nil
     lastSecondaryWrittenPts = nil
-    shouldExportFrames2PngSequence = captureMode != .singleWide
+    isSecondaryRecordingEnabled = captureMode != .singleWide
+    shouldExportFrames2PngSequence = isSecondaryRecordingEnabled
     prepareFrames2DirectoryIfNeeded()
 
     captureSession?.startRunning()
@@ -816,9 +818,14 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     }
 
     let hasSecondWriter =
-      captureMode != .singleWide && secondSample != nil && assetWriter2 != nil && videoInput2 != nil
-    let canAppendSecond = hasSecondWriter && (videoInput2?.isReadyForMoreMediaData ?? false)
-    let secondSampleForThisFrame = hasSecondWriter ? secondSample : nil
+      isSecondaryRecordingEnabled
+      && captureMode != .singleWide
+      && assetWriter2?.status == .writing
+      && assetWriter2 != nil
+      && videoInput2 != nil
+    let hasSecondSample = hasSecondWriter && secondSample != nil
+    let canAppendSecond = hasSecondSample && (videoInput2?.isReadyForMoreMediaData ?? false)
+    let secondSampleForThisFrame = hasSecondSample ? secondSample : nil
 
     if !didStartWriter {
       writer.startSession(atSourceTime: primaryPts)
@@ -844,6 +851,9 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       if canAppendSecond, let i2 = videoInput2, let sb2 = secondSampleForThisFrame {
         let sb2ToAppend = Self.retimeSampleBufferIfNeeded(sb2, to: primaryPts) ?? sb2
         appendedSecond = i2.append(sb2ToAppend)
+        if !appendedSecond {
+          discardSecondaryVideoOutput()
+        }
       }
 
       firstVideoPts = primaryPts
@@ -883,6 +893,8 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       let sb2ToAppend = Self.retimeSampleBufferIfNeeded(sb2, to: primaryPts) ?? sb2
       if i2.append(sb2ToAppend) {
         lastSecondaryWrittenPts = primaryPts
+      } else {
+        discardSecondaryVideoOutput()
       }
     }
   }
@@ -1002,7 +1014,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       return false
     }
 
-    if captureMode != .singleWide, let sec = second, let pb2 = CMSampleBufferGetImageBuffer(sec) {
+    if isSecondaryRecordingEnabled, captureMode != .singleWide, let sec = second, let pb2 = CMSampleBufferGetImageBuffer(sec) {
       let w2 = CVPixelBufferGetWidth(pb2)
       let h2 = CVPixelBufferGetHeight(pb2)
       videoWidth2 = w2
@@ -1028,27 +1040,22 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
         input2.expectsMediaDataInRealTime = true
 
         guard writer2.canAdd(input2) else {
-          assetWriter?.cancelWriting()
-          assetWriter = nil
-          videoInput = nil
-          return false
+          writer2.cancelWriting()
+          discardSecondaryVideoOutput()
+          return true
         }
         writer2.add(input2)
         guard writer2.startWriting() else {
           writer2.cancelWriting()
-          assetWriter?.cancelWriting()
-          assetWriter = nil
-          videoInput = nil
-          return false
+          discardSecondaryVideoOutput()
+          return true
         }
 
         assetWriter2 = writer2
         videoInput2 = input2
       } catch {
-        assetWriter?.cancelWriting()
-        assetWriter = nil
-        videoInput = nil
-        return false
+        discardSecondaryVideoOutput()
+        return true
       }
     } else {
       videoWidth2 = 0
@@ -1277,11 +1284,44 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     return CGSize(width: width, height: height)
   }
 
+  private func prunePendingSecondaryFrameMetadata() {
+    guard !pendingJsonl.isEmpty else { return }
+    for i in pendingJsonl.indices {
+      let line = pendingJsonl[i]
+      guard line.kind == .frame else { continue }
+      guard var frames = line.object["frames"] as? [[String: Any]] else { continue }
+      if frames.count <= 1 { continue }
+      frames = frames.filter { frame in
+        (frame["cameraInd"] as? Int) != 1
+      }
+      var newObject = line.object
+      newObject["frames"] = frames
+      pendingJsonl[i] = PendingJsonlLine(time: line.time, kind: line.kind, object: newObject)
+    }
+  }
+
+  private func discardSecondaryVideoOutput() {
+    if let w2 = assetWriter2, w2.status == .writing || w2.status == .unknown {
+      w2.cancelWriting()
+    }
+    isSecondaryRecordingEnabled = false
+    shouldExportFrames2PngSequence = false
+    assetWriter2 = nil
+    videoInput2 = nil
+    videoWidth2 = 0
+    videoHeight2 = 0
+    lastSecondaryWrittenPts = nil
+    prunePendingSecondaryFrameMetadata()
+    let movie2URL = outputDirectory.appendingPathComponent("data2.mov")
+    try? FileManager.default.removeItem(at: movie2URL)
+    try? FileManager.default.removeItem(at: frames2DirectoryURL)
+  }
+
   private func hasValidRecordedVideos() -> Bool {
     let movieURL = outputDirectory.appendingPathComponent("data.mov")
     guard Self.videoResolution(from: movieURL) != nil else { return false }
 
-    if videoWidth2 > 0, videoHeight2 > 0 {
+    if lastSecondaryWrittenPts != nil {
       let movie2URL = outputDirectory.appendingPathComponent("data2.mov")
       guard Self.videoResolution(from: movie2URL) != nil else { return false }
     }
@@ -1315,8 +1355,6 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     pendingWideBuffers.removeAll()
     ultraBufferQueue.removeAll()
 
-    writeSortedJsonlToDisk()
-
     let finalizeFailure: (Error) -> Void = { [weak self] error in
       guard let self = self else { return }
       self.assetWriter = nil
@@ -1342,6 +1380,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
         return
       }
 
+      self.writeSortedJsonlToDisk()
       self.writeCalibrationJson()
       self.writeMetadataJson()
 
@@ -1354,12 +1393,25 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     let finishOne: () -> Void = { [weak self] in
       guard let self = self else { return }
       if let input2 = self.videoInput2, let w2 = self.assetWriter2, self.didStartWriter {
+        guard self.lastSecondaryWrittenPts != nil else {
+          self.discardSecondaryVideoOutput()
+          finalizeSuccess()
+          return
+        }
+
+        if w2.status == .failed {
+          self.discardSecondaryVideoOutput()
+          finalizeSuccess()
+          return
+        }
+
         input2.markAsFinished()
         w2.finishWriting { [weak self] in
           guard let self = self else { return }
           self.syncQueue.async {
             guard w2.status == .completed else {
-              finalizeFailure(SlamRecordingError.wrapWriterError(w2.error))
+              self.discardSecondaryVideoOutput()
+              finalizeSuccess()
               return
             }
             finalizeSuccess()
