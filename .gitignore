@@ -44,3 +44,10 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Local docs artifacts (sai-cli/debug outputs)
+/docs/*momo*
+/docs/*mono*
+/docs/*default*
+/docs/*none*
+/docs/*output*

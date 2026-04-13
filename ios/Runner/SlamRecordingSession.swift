@@ -4,9 +4,11 @@ import CoreMotion
 import CoreVideo
 import Darwin
 import Foundation
+import ImageIO
 import QuartzCore
 import simd
 import UIKit
+import UniformTypeIdentifiers
 
 enum SlamRecordingError: LocalizedError {
   case simulatorNotSupported
@@ -95,6 +97,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
   private let motionQueue = OperationQueue()
   private let magnetometerQueue = OperationQueue()
   private let ciContext = CIContext(options: nil)
+  private let metersPerGravity: Double = 9.80665
 
   private var captureSession: AVCaptureSession?
   private var captureDevice: AVCaptureDevice?
@@ -615,9 +618,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       depthDataObj = depSync.depthData
     }
 
-    guard let depthData = depthDataObj,
-          let grayBuffer = Self.depthFloat32ToGrayBGRA(depthData: depthData)
-    else {
+    guard let depthData = depthDataObj else {
       return
     }
 
@@ -635,11 +636,12 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       lastDepthToWideExtrinsic = Self.depthToWideExtrinsicRows(cal)
     }
 
-    guard let sb2 = Self.makeSampleBuffer(from: grayBuffer, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
-    else {
-      return
-    }
-    processVideoSampleBuffer(sampleBuffer, secondSample: sb2, depthCalibration: depthData.cameraCalibrationData)
+    processVideoSampleBuffer(
+      sampleBuffer,
+      secondSample: nil,
+      depthCalibration: depthData.cameraCalibrationData,
+      depthData: depthData
+    )
   }
 
   /// 将深度图转为 BGRA8，用于写入 `frames2/*.png`。
@@ -740,7 +742,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       switch self.captureMode {
       case .singleWide:
         if output === self.videoOutput {
-          self.processVideoSampleBuffer(sampleBuffer, secondSample: nil, depthCalibration: nil)
+          self.processVideoSampleBuffer(sampleBuffer, secondSample: nil, depthCalibration: nil, depthData: nil)
         }
       case .multiCamRgb:
         self.handleMultiCamOutput(output: output, sampleBuffer: sampleBuffer)
@@ -786,7 +788,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
 
     let ultra = ultraBufferQueue.remove(at: idx)
     pendingWideBuffers.removeFirst()
-    processVideoSampleBuffer(wide, secondSample: ultra, depthCalibration: nil)
+    processVideoSampleBuffer(wide, secondSample: ultra, depthCalibration: nil, depthData: nil)
   }
 
   // MARK: - 统一处理
@@ -794,7 +796,8 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
   private func processVideoSampleBuffer(
     _ sampleBuffer: CMSampleBuffer,
     secondSample: CMSampleBuffer?,
-    depthCalibration: AVCameraCalibrationData?
+    depthCalibration: AVCameraCalibrationData?,
+    depthData: AVDepthData? = nil
   ) {
     guard !isStopping else { return }
 
@@ -853,6 +856,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       exportFrames2PngIfNeeded(
         wideSample: sampleBuffer,
         secondSample: secondSampleForThisFrame,
+        depthData: depthData,
         frameNumber: frameIndex
       )
       frameIndex += 1
@@ -869,6 +873,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     exportFrames2PngIfNeeded(
       wideSample: sampleBuffer,
       secondSample: secondSampleForThisFrame,
+      depthData: depthData,
       frameNumber: frameIndex
     )
     frameIndex += 1
@@ -930,12 +935,25 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
   private func exportFrames2PngIfNeeded(
     wideSample: CMSampleBuffer,
     secondSample: CMSampleBuffer?,
+    depthData: AVDepthData?,
     frameNumber: Int
   ) {
+    guard shouldExportFrames2PngSequence else {
+      return
+    }
+
+    let fileName = String(format: "%08d.png", frameNumber)
+    let url = frames2DirectoryURL.appendingPathComponent(fileName)
+
+    if captureMode == .depthAndWide, let depthData {
+      if writeDepthPng16(from: depthData, to: url) {
+        return
+      }
+      // If depth encoding fails, fall back to RGB-style PNG export below.
+    }
+
     let sampleToExport = secondSample ?? wideSample
-    guard shouldExportFrames2PngSequence,
-          let pixelBuffer = CMSampleBufferGetImageBuffer(sampleToExport)
-    else {
+    guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleToExport) else {
       return
     }
 
@@ -950,9 +968,72 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       return
     }
 
-    let fileName = String(format: "%08d.png", frameNumber)
-    let url = frames2DirectoryURL.appendingPathComponent(fileName)
     try? data.write(to: url, options: [.atomic])
+  }
+
+  /// Export depth map as 16-bit grayscale PNG in millimeters.
+  /// The decoding convention is: depthMeters = pngValue * depthScale, where depthScale = 0.001.
+  private func writeDepthPng16(from depthData: AVDepthData, to url: URL) -> Bool {
+    let converted = depthData.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32)
+    let depthMap = converted.depthDataMap
+    let width = CVPixelBufferGetWidth(depthMap)
+    let height = CVPixelBufferGetHeight(depthMap)
+    guard width > 0, height > 0 else { return false }
+
+    CVPixelBufferLockBaseAddress(depthMap, .readOnly)
+    defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
+
+    guard let baseAddress = CVPixelBufferGetBaseAddress(depthMap) else { return false }
+    let rowBytes = CVPixelBufferGetBytesPerRow(depthMap)
+
+    var depthMillimetersBE = [UInt16](repeating: 0, count: width * height)
+    for y in 0..<height {
+      let row = baseAddress.advanced(by: y * rowBytes).assumingMemoryBound(to: Float.self)
+      for x in 0..<width {
+        let meters = row[x]
+        let mmValue: UInt16
+        if meters.isFinite, meters > 0 {
+          let mm = Int(round(Double(meters) / jsonDepthScale))
+          mmValue = UInt16(clamping: max(1, min(mm, Int(UInt16.max))))
+        } else {
+          mmValue = 0
+        }
+        depthMillimetersBE[y * width + x] = mmValue.bigEndian
+      }
+    }
+
+    let data = depthMillimetersBE.withUnsafeBufferPointer { Data(buffer: $0) }
+    guard let provider = CGDataProvider(data: data as CFData) else { return false }
+
+    let colorSpace = CGColorSpaceCreateDeviceGray()
+    let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue).union(.byteOrder16Big)
+    guard let cgImage = CGImage(
+      width: width,
+      height: height,
+      bitsPerComponent: 16,
+      bitsPerPixel: 16,
+      bytesPerRow: width * MemoryLayout<UInt16>.size,
+      space: colorSpace,
+      bitmapInfo: bitmapInfo,
+      provider: provider,
+      decode: nil,
+      shouldInterpolate: false,
+      intent: .defaultIntent
+    ) else {
+      return false
+    }
+
+    guard let destination = CGImageDestinationCreateWithURL(
+      url as CFURL,
+      UTType.png.identifier as CFString,
+      1,
+      nil
+    ) else {
+      return false
+    }
+
+    CGImageDestinationAddImage(destination, cgImage, nil)
+    return CGImageDestinationFinalize(destination)
   }
 
   private func startWritersIfNeeded(with sampleBuffer: CMSampleBuffer, second: CMSampleBuffer?) -> Bool {
@@ -1138,12 +1219,24 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
 
     var framesArray: [[String: Any]] = [frame0]
 
-    if let sb2 = secondSample {
+    if isDepthGray || secondSample != nil {
       var frame1: [String: Any] = [
         "cameraInd": 1,
-        "time": 0,
         "aligned": true,
       ]
+
+      let secondaryOffsetSeconds: Double = {
+        guard let sb2 = secondSample else { return 0 }
+        let widePts = CMSampleBufferGetPresentationTimeStamp(wideSample)
+        let secondPts = CMSampleBufferGetPresentationTimeStamp(sb2)
+        let delta = CMTimeGetSeconds(CMTimeSubtract(secondPts, widePts))
+        if delta.isFinite {
+          return max(0, delta)
+        }
+        return 0
+      }()
+      frame1["time"] = secondaryOffsetSeconds
+
       if isDepthGray {
         frame1["colorFormat"] = "gray"
         frame1["depthScale"] = jsonDepthScale
@@ -1163,6 +1256,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
           ]
         }
       } else {
+        guard let sb2 = secondSample else { return }
         frame1["colorFormat"] = "rgb"
         if let c2 = Self.intrinsicCalibration(from: sb2) {
           lastSecondFocalLengthX = c2.fx
@@ -1490,13 +1584,13 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
 
   private func appendImuLines(from motion: CMDeviceMotion) {
     guard !isStopping, didStartWriter else { return }
-    let t = CACurrentMediaTime()
+    let t = motion.timestamp
     let gx = motion.rotationRate.x
     let gy = motion.rotationRate.y
     let gz = motion.rotationRate.z
-    let ax = motion.gravity.x + motion.userAcceleration.x
-    let ay = motion.gravity.y + motion.userAcceleration.y
-    let az = motion.gravity.z + motion.userAcceleration.z
+    let ax = (motion.gravity.x + motion.userAcceleration.x) * metersPerGravity
+    let ay = (motion.gravity.y + motion.userAcceleration.y) * metersPerGravity
+    let az = (motion.gravity.z + motion.userAcceleration.z) * metersPerGravity
 
     enqueueJsonl(
       time: t,
@@ -1524,7 +1618,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
 
   private func appendMagnetometerLine(_ data: CMMagnetometerData) {
     guard !isStopping, didStartWriter else { return }
-    let t = CACurrentMediaTime()
+    let t = data.timestamp
     let f = data.magneticField
     enqueueJsonl(
       time: t,
