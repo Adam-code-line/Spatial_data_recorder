@@ -14,6 +14,7 @@ enum SlamRecordingError: LocalizedError {
   case simulatorNotSupported
   case cameraPermissionDenied
   case captureSetupFailed
+  case depthModeRequired
   case writerSetupFailed(String)
   case alreadyRecording
 
@@ -48,6 +49,8 @@ enum SlamRecordingError: LocalizedError {
       return "未授予相机权限。"
     case .captureSetupFailed:
       return "无法配置相机采集。"
+    case .depthModeRequired:
+      return "当前设备或配置未进入 LiDAR 深度模式，已阻止录制。"
     case .writerSetupFailed(let message):
       return "视频写入失败: \(message)"
     case .alreadyRecording:
@@ -117,6 +120,8 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
   private let motionManager = CMMotionManager()
 
   private var captureMode: DualCaptureMode = .singleWide
+  /// Enforce LiDAR depth capture so generated scenes always contain depth stream.
+  private let requireDepthAndWideMode = true
   private var shouldExportFrames2PngSequence = false
   private var isSecondaryRecordingEnabled = false
 
@@ -210,6 +215,9 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
 
     if configureDepthAndWideSession() {
       captureMode = .depthAndWide
+    } else if requireDepthAndWideMode {
+      DispatchQueue.main.async { completion(SlamRecordingError.depthModeRequired) }
+      return
     } else if configureMultiCamSession() {
       captureMode = .multiCamRgb
     } else if configureSingleWideSession() {
@@ -946,10 +954,10 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     let url = frames2DirectoryURL.appendingPathComponent(fileName)
 
     if captureMode == .depthAndWide, let depthData {
-      if writeDepthPng16(from: depthData, to: url) {
-        return
+      if !writeDepthPng16(from: depthData, to: url) {
+        print("[SLAM] failed to write depth PNG: \(url.path)")
       }
-      // If depth encoding fails, fall back to RGB-style PNG export below.
+      return
     }
 
     let sampleToExport = secondSample ?? wideSample
@@ -1670,9 +1678,21 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
 
     var cameras: [[String: Any]] = [cam1]
 
-    if captureMode != .singleWide, videoWidth2 > 0, videoHeight2 > 0 {
-      let w2 = videoWidth2
-      let h2 = videoHeight2
+    let shouldWriteSecondCamera = (captureMode == .depthAndWide)
+      || (captureMode != .singleWide && videoWidth2 > 0 && videoHeight2 > 0)
+
+    if shouldWriteSecondCamera {
+      let w2: Int
+      let h2: Int
+      if captureMode == .depthAndWide {
+        // In depth mode there is no secondary video writer, but we still need
+        // camera #1 intrinsics/extrinsics for downstream depth-aware tooling.
+        w2 = w
+        h2 = h
+      } else {
+        w2 = videoWidth2
+        h2 = videoHeight2
+      }
       let fx2 = didUpdateSecondIntrinsics && lastSecondFocalLengthX > 1 ? lastSecondFocalLengthX : fx1
       let fy2 = didUpdateSecondIntrinsics && lastSecondFocalLengthY > 1 ? lastSecondFocalLengthY : fy1
       let cx2 = didUpdateSecondIntrinsics ? lastSecondPrincipalPointX : Double(w2) / 2.0
@@ -1708,9 +1728,20 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
 
   private func writeMetadataJson() {
     let model = SlamRecordingSession.machineModelName()
+    let captureModeName: String
+    switch captureMode {
+    case .depthAndWide:
+      captureModeName = "depthAndWide"
+    case .multiCamRgb:
+      captureModeName = "multiCamRgb"
+    case .singleWide:
+      captureModeName = "singleWide"
+    }
     let root: [String: Any] = [
       "device_model": model,
       "platform": "ios",
+      "capture_mode": captureModeName,
+      "depth_mode_required": requireDepthAndWideMode,
     ]
     writeJsonFile(name: "metadata.json", object: root)
   }

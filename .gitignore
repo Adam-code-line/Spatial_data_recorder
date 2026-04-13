@@ -52,3 +52,4 @@ app.*.map.json
 /docs/*none*
 /docs/*output*
 /docs/*scene*
+/docs/*sai_cli*
