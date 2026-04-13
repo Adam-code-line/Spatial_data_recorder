@@ -72,15 +72,15 @@ private struct PendingJsonlLine {
 
 /// 采集模式：LiDAR 深度 + 广角 RGB（样例风格第二路 gray+depthScale）、或 MultiCam 广角+超广角双 RGB、或单广角。
 private enum DualCaptureMode {
-  /// `data.mov` 广角 RGB + `data2.mov` 深度图转灰度（`colorFormat: gray`、`depthScale`）
+  /// `data.mov` 广角 RGB + `frames2/*.png` 深度图转灰度（`colorFormat: gray`、`depthScale`）
   case depthAndWide
-  /// `data.mov` 广角 + `data2.mov` 超广角 RGB（无 LiDAR 时回退）
+  /// `data.mov` 广角 + `frames2/*.png` 超广角 RGB（无 LiDAR 时回退）
   case multiCamRgb
   /// 仅广角（配置失败时）
   case singleWide
 }
 
-/// Spectacular 风格：`data.mov` / `data2.mov` + JSONL 双 `frames`；IMU 与 P1 行为保留。
+/// Spectacular 风格：`data.mov` + `frames2` + JSONL 双 `frames`；IMU 与 P1 行为保留。
 final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDelegate,
   AVCaptureVideoDataOutputSampleBufferDelegate
 {
@@ -642,7 +642,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     processVideoSampleBuffer(sampleBuffer, secondSample: sb2, depthCalibration: depthData.cameraCalibrationData)
   }
 
-  /// 将深度图转为 BGRA8，用于写入 `data2.mov`。
+  /// 将深度图转为 BGRA8，用于写入 `frames2/*.png`。
   private static func depthFloat32ToGrayBGRA(depthData: AVDepthData) -> CVPixelBuffer? {
     let converted = depthData.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32)
     let depthMap = converted.depthDataMap
@@ -817,21 +817,11 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       return
     }
 
-    let hasSecondWriter =
-      isSecondaryRecordingEnabled
-      && captureMode != .singleWide
-      && assetWriter2?.status == .writing
-      && assetWriter2 != nil
-      && videoInput2 != nil
-    let hasSecondSample = hasSecondWriter && secondSample != nil
-    let canAppendSecond = hasSecondSample && (videoInput2?.isReadyForMoreMediaData ?? false)
+    let hasSecondSample = isSecondaryRecordingEnabled && secondSample != nil
     let secondSampleForThisFrame = hasSecondSample ? secondSample : nil
 
     if !didStartWriter {
       writer.startSession(atSourceTime: primaryPts)
-      if hasSecondWriter, let w2 = assetWriter2 {
-        w2.startSession(atSourceTime: primaryPts)
-      }
 
       guard input.append(sampleBuffer) else {
         writer.cancelWriting()
@@ -847,23 +837,11 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
         return
       }
 
-      var appendedSecond = false
-      if canAppendSecond, let i2 = videoInput2, let sb2 = secondSampleForThisFrame {
-        let sb2ToAppend = Self.retimeSampleBufferIfNeeded(sb2, to: primaryPts) ?? sb2
-        appendedSecond = i2.append(sb2ToAppend)
-        if !appendedSecond {
-          discardSecondaryVideoOutput()
-        }
-      }
-
       firstVideoPts = primaryPts
       timeOriginMedia = CACurrentMediaTime()
       startMotion()
       didStartWriter = true
       lastPrimaryWrittenPts = primaryPts
-      if appendedSecond {
-        lastSecondaryWrittenPts = primaryPts
-      }
 
       appendFrameJsonl(
         number: frameIndex,
@@ -896,14 +874,6 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     frameIndex += 1
     if input.append(sampleBuffer) {
       lastPrimaryWrittenPts = primaryPts
-    }
-    if canAppendSecond, let i2 = videoInput2, let sb2 = secondSampleForThisFrame {
-      let sb2ToAppend = Self.retimeSampleBufferIfNeeded(sb2, to: primaryPts) ?? sb2
-      if i2.append(sb2ToAppend) {
-        lastSecondaryWrittenPts = primaryPts
-      } else {
-        discardSecondaryVideoOutput()
-      }
     }
   }
 
@@ -1031,44 +1001,10 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       let h2 = CVPixelBufferGetHeight(pb2)
       videoWidth2 = w2
       videoHeight2 = h2
-
       let movie2URL = outputDirectory.appendingPathComponent("data2.mov")
       try? FileManager.default.removeItem(at: movie2URL)
-
-      do {
-        let writer2 = try AVAssetWriter(outputURL: movie2URL, fileType: .mov)
-        let videoSettings2: [String: Any] = [
-          AVVideoCodecKey: AVVideoCodecType.h264,
-          AVVideoWidthKey: w2,
-          AVVideoHeightKey: h2,
-          AVVideoCompressionPropertiesKey: [
-            AVVideoAverageBitRateKey: w2 * h2 * 4,
-            AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
-            AVVideoMaxKeyFrameIntervalKey: 60,
-          ] as [String: Any],
-        ]
-
-        let input2 = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings2)
-        input2.expectsMediaDataInRealTime = true
-
-        guard writer2.canAdd(input2) else {
-          writer2.cancelWriting()
-          discardSecondaryVideoOutput()
-          return true
-        }
-        writer2.add(input2)
-        guard writer2.startWriting() else {
-          writer2.cancelWriting()
-          discardSecondaryVideoOutput()
-          return true
-        }
-
-        assetWriter2 = writer2
-        videoInput2 = input2
-      } catch {
-        discardSecondaryVideoOutput()
-        return true
-      }
+      assetWriter2 = nil
+      videoInput2 = nil
     } else {
       videoWidth2 = 0
       videoHeight2 = 0
@@ -1457,6 +1393,10 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
         guard let self = self else { return }
         self.syncQueue.async {
           guard writer.status == .completed else {
+            if self.hasValidRecordedVideos() {
+              finishOne()
+              return
+            }
             finalizeFailure(SlamRecordingError.wrapWriterError(writer.error))
             return
           }
