@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 import '../../core/upload/models/upload_enqueue_result.dart';
 import '../../core/upload/models/upload_task.dart';
 import '../../core/upload/upload_providers.dart';
+import 'upload_session_context_dialog.dart';
 
 class RecordingsBrowserPage extends ConsumerStatefulWidget {
   const RecordingsBrowserPage({super.key});
@@ -81,6 +82,21 @@ class _RecordingsBrowserPageState extends ConsumerState<RecordingsBrowserPage> {
     UploadTask? existingTask,
   ) async {
     try {
+      final contextService = ref.read(uploadSessionContextServiceProvider);
+      final uploadContext = await showUploadSessionContextDialog(
+        context: context,
+        sessionPath: directory.path,
+        contextService: contextService,
+      );
+      if (uploadContext == null) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('会话已保留在本地，未加入上传队列。')));
+        return;
+      }
+      await contextService.writeForSession(directory.path, uploadContext);
+
       if (existingTask != null &&
           (existingTask.status == UploadTaskStatus.failed ||
               existingTask.status == UploadTaskStatus.cancelled)) {

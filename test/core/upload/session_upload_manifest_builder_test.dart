@@ -45,6 +45,9 @@ void main() {
         p.join(sessionDir.path, 'data2.mov'),
       ).writeAsString('optional-data2');
       await File(
+        p.join(sessionDir.path, 'upload_context.json'),
+      ).writeAsString('{"sceneName":"scene_demo","seqName":"seq_demo"}');
+      await File(
         p.join(sessionDir.path, 'README.md'),
       ).writeAsString('ignored-readme');
       await File(
@@ -66,6 +69,7 @@ void main() {
       expect(relativePaths, contains(p.normalize('calibration.json')));
       expect(relativePaths, contains(p.normalize('metadata.json')));
       expect(relativePaths, contains(p.normalize('data2.mov')));
+      expect(relativePaths, contains(p.normalize('upload_context.json')));
       expect(relativePaths, contains(p.normalize('frames2/00000000.png')));
       expect(relativePaths, contains(p.normalize('frames2/00000001.png')));
 

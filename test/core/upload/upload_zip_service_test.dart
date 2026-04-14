@@ -42,6 +42,9 @@ void main() {
           p.join(sessionDir.path, name),
         ).writeAsString('required-$name');
       }
+      await File(
+        p.join(sessionDir.path, 'upload_context.json'),
+      ).writeAsString('{"sceneName":"scene_demo","seqName":"seq_demo"}');
 
       final frames2Dir = Directory(p.join(sessionDir.path, 'frames2'));
       await frames2Dir.create(recursive: true);

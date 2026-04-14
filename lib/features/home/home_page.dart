@@ -12,6 +12,7 @@ import '../../core/upload/models/upload_task.dart';
 import '../../core/upload/upload_providers.dart';
 import 'recordings_browser_page.dart';
 import 'recorder_live_preview.dart';
+import 'upload_session_context_dialog.dart';
 
 class HomePage extends ConsumerStatefulWidget {
   const HomePage({super.key});
@@ -71,6 +72,53 @@ class _HomePageState extends ConsumerState<HomePage> {
     return false;
   }
 
+  Future<bool?> _resolveAudioEnabled() async {
+    var status = await Permission.microphone.status;
+    if (status.isGranted) {
+      return true;
+    }
+
+    status = await Permission.microphone.request();
+    if (status.isGranted) {
+      return true;
+    }
+
+    if (!mounted) {
+      return null;
+    }
+
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('麦克风权限未开启'),
+        content: const Text('当前未获得麦克风权限。你可以继续录制，但本次会话不会包含音频。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop('cancel'),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop('settings'),
+            child: const Text('去设置'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop('continue'),
+            child: const Text('无音频继续'),
+          ),
+        ],
+      ),
+    );
+
+    if (choice == 'settings') {
+      await openAppSettings();
+      return null;
+    }
+    if (choice == 'continue') {
+      return false;
+    }
+    return null;
+  }
+
   Future<void> _refreshStatus() async {
     try {
       final status = await ref
@@ -117,13 +165,20 @@ class _HomePageState extends ConsumerState<HomePage> {
       if (!ok) {
         return;
       }
+      final enableAudio = await _resolveAudioEnabled();
+      if (enableAudio == null) {
+        return;
+      }
 
       final dir = await createSessionDirectory();
 
       await ref
           .read(recorderPlatformProvider)
-          .startRecording(outputDir: dir.path);
+          .startRecording(outputDir: dir.path, enableAudio: enableAudio);
       await _refreshStatus();
+      if (mounted && !enableAudio) {
+        _toast('已开始录制，本次将不包含音频。');
+      }
     } catch (e) {
       _toast('开始录制失败：$e');
     } finally {
@@ -155,14 +210,24 @@ class _HomePageState extends ConsumerState<HomePage> {
         return;
       }
 
-      var uploadMessage = '上传任务状态未知。';
-      try {
-        final enqueueResult = await ref
-            .read(uploadQueueControllerProvider.notifier)
-            .enqueueSession(sessionPath);
-        uploadMessage = _enqueueMessage(enqueueResult);
-      } catch (e) {
-        uploadMessage = '录制已完成，但加入上传队列失败：$e';
+      final contextService = ref.read(uploadSessionContextServiceProvider);
+      final uploadContext = await showUploadSessionContextDialog(
+        context: context,
+        sessionPath: sessionPath,
+        contextService: contextService,
+      );
+
+      var uploadMessage = '录制已完成，仅保存到本地。';
+      if (uploadContext != null) {
+        try {
+          await contextService.writeForSession(sessionPath, uploadContext);
+          final enqueueResult = await ref
+              .read(uploadQueueControllerProvider.notifier)
+              .enqueueSession(sessionPath);
+          uploadMessage = _enqueueMessage(enqueueResult);
+        } catch (e) {
+          uploadMessage = '录制已完成，但加入上传队列失败：$e';
+        }
       }
 
       await _refreshStatus();

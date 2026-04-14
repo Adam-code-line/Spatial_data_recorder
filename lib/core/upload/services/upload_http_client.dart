@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:path/path.dart' as p;
 
+import '../models/upload_session_context.dart';
 import '../models/upload_task.dart';
 import '../upload_config.dart';
 import '../upload_exceptions.dart';
@@ -18,18 +19,32 @@ class UploadHttpClient {
   Future<Map<String, dynamic>?> uploadZip({
     required UploadTask task,
     required File zipFile,
+    UploadSessionContext? sessionContext,
     required void Function(int sent, int total) onSendProgress,
     CancelToken? cancelToken,
   }) async {
     try {
-      final formData = FormData.fromMap(<String, dynamic>{
+      final formFields = <String, dynamic>{
         'file': await MultipartFile.fromFile(
           zipFile.path,
           filename: p.basename(zipFile.path),
         ),
         'sessionName': task.sessionName,
         'sessionPath': task.sessionPath,
-      });
+        if (sessionContext?.captureName case final captureName?
+            when captureName.isNotEmpty)
+          'captureName': captureName,
+        if (sessionContext != null) 'sceneName': sessionContext.sceneName,
+        if (sessionContext != null) 'seqName': sessionContext.seqName,
+        if (sessionContext != null)
+          'captureType': sessionContext.captureType.wireValue,
+        if (sessionContext?.pairGroupId case final pairGroupId?
+            when pairGroupId.isNotEmpty)
+          'pairGroupId': pairGroupId,
+        if (sessionContext != null)
+          'audioTrackPresent': sessionContext.audioTrackPresent ? 'true' : 'false',
+      };
+      final formData = FormData.fromMap(formFields);
 
       final headers = <String, String>{
         ..._config.extraHeaders,

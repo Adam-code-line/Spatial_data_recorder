@@ -7,6 +7,7 @@ import 'models/upload_task.dart';
 import 'repository/upload_queue_repository.dart';
 import 'services/session_upload_manifest_builder.dart';
 import 'services/upload_http_client.dart';
+import 'services/upload_session_context_service.dart';
 import 'services/upload_zip_service.dart';
 import 'upload_config.dart';
 
@@ -38,6 +39,11 @@ final uploadZipServiceProvider = Provider<UploadZipService>((ref) {
   return UploadZipService();
 });
 
+final uploadSessionContextServiceProvider =
+    Provider<UploadSessionContextService>((ref) {
+      return UploadSessionContextService();
+    });
+
 final uploadHttpClientProvider = Provider<UploadHttpClient>((ref) {
   return UploadHttpClient(
     dio: ref.watch(uploadDioProvider),
@@ -55,6 +61,7 @@ final uploadQueueControllerProvider =
         repository: ref.watch(uploadQueueRepositoryProvider),
         manifestBuilder: ref.watch(sessionUploadManifestBuilderProvider),
         zipService: ref.watch(uploadZipServiceProvider),
+        contextService: ref.watch(uploadSessionContextServiceProvider),
         httpClient: ref.watch(uploadHttpClientProvider),
         config: ref.watch(uploadConfigProvider),
       );

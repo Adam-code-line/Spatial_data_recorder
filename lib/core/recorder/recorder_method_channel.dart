@@ -26,9 +26,13 @@ class RecorderMethodChannel implements RecorderPlatform {
   }
 
   @override
-  Future<void> startRecording({required String outputDir}) async {
+  Future<void> startRecording({
+    required String outputDir,
+    required bool enableAudio,
+  }) async {
     await _channel.invokeMethod<void>('startRecording', <String, dynamic>{
       'outputDir': outputDir,
+      'enableAudio': enableAudio,
     });
   }
 

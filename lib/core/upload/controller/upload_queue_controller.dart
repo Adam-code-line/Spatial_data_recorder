@@ -12,6 +12,7 @@ import '../models/upload_task.dart';
 import '../repository/upload_queue_repository.dart';
 import '../services/session_upload_manifest_builder.dart';
 import '../services/upload_http_client.dart';
+import '../services/upload_session_context_service.dart';
 import '../services/upload_zip_service.dart';
 import '../upload_config.dart';
 import '../upload_exceptions.dart';
@@ -21,12 +22,14 @@ class UploadQueueController extends StateNotifier<UploadQueueState> {
     required UploadQueueRepository repository,
     required SessionUploadManifestBuilder manifestBuilder,
     required UploadZipService zipService,
+    required UploadSessionContextService contextService,
     required UploadHttpClient httpClient,
     required UploadConfig config,
     DateTime Function()? now,
   }) : _repository = repository,
        _manifestBuilder = manifestBuilder,
        _zipService = zipService,
+       _contextService = contextService,
        _httpClient = httpClient,
        _config = config,
        _now = now ?? DateTime.now,
@@ -37,6 +40,7 @@ class UploadQueueController extends StateNotifier<UploadQueueState> {
   final UploadQueueRepository _repository;
   final SessionUploadManifestBuilder _manifestBuilder;
   final UploadZipService _zipService;
+  final UploadSessionContextService _contextService;
   final UploadHttpClient _httpClient;
   final UploadConfig _config;
   final DateTime Function() _now;
@@ -342,10 +346,12 @@ class UploadQueueController extends StateNotifier<UploadQueueState> {
       }
 
       final zipFile = File(zipResult.zipPath);
+      final sessionContext = await _contextService.readForSession(task.sessionPath);
       _activeCancelToken = CancelToken();
       final response = await _httpClient.uploadZip(
         task: task,
         zipFile: zipFile,
+        sessionContext: sessionContext,
         cancelToken: _activeCancelToken,
         onSendProgress: (sent, total) {
           _updateTaskInMemory(

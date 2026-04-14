@@ -13,6 +13,10 @@ class SessionUploadManifestBuilder {
     'calibration.json',
     'metadata.json',
   };
+  static const Set<String> _optionalRootFiles = <String>{
+    'data2.mov',
+    'upload_context.json',
+  };
 
   static const String _requiredFramesDir = 'frames2';
 
@@ -46,6 +50,25 @@ class SessionUploadManifestBuilder {
         );
       }
 
+      totalSizeBytes += stat.size;
+      entries.add(
+        UploadManifestEntry(
+          absolutePath: file.path,
+          relativePath: fileName,
+          sizeBytes: stat.size,
+        ),
+      );
+    }
+
+    for (final fileName in _optionalRootFiles) {
+      final file = File(p.join(sessionDir.path, fileName));
+      if (!await file.exists()) {
+        continue;
+      }
+      final stat = await file.stat();
+      if (stat.type != FileSystemEntityType.file) {
+        continue;
+      }
       totalSizeBytes += stat.size;
       entries.add(
         UploadManifestEntry(

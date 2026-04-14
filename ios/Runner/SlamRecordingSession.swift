@@ -87,7 +87,7 @@ private enum DualCaptureMode {
 
 /// Spectacular 风格：`data.mov` + `frames2` + JSONL 双 `frames`；IMU 与 P1 行为保留。
 final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDelegate,
-  AVCaptureVideoDataOutputSampleBufferDelegate
+  AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate
 {
   let outputDirectory: URL
 
@@ -108,16 +108,19 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
   private var videoOutput: AVCaptureVideoDataOutput?
   private var depthOutput: AVCaptureDepthDataOutput?
   private var secondVideoOutput: AVCaptureVideoDataOutput?
+  private var audioOutput: AVCaptureAudioDataOutput?
   private var dataOutputSynchronizer: AVCaptureDataOutputSynchronizer?
 
   private var assetWriter: AVAssetWriter?
   private var videoInput: AVAssetWriterInput?
+  private var audioInput: AVAssetWriterInput?
   private var assetWriter2: AVAssetWriter?
   private var videoInput2: AVAssetWriterInput?
 
   private var pendingJsonl: [PendingJsonlLine] = []
 
   private let motionManager = CMMotionManager()
+  private let requestedAudioCapture: Bool
 
   private var captureMode: DualCaptureMode = .singleWide
   /// Enforce LiDAR depth capture so generated scenes always contain depth stream.
@@ -157,8 +160,13 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
 
   private var isStopping = false
   private var didStartWriter = false
+  private var didAppendAudioSample = false
   private var lastPrimaryWrittenPts: CMTime?
   private var lastSecondaryWrittenPts: CMTime?
+  private var audioPermissionGranted = false
+  private var audioCaptureEnabled = false
+  private var audioSampleRate: Double = 0
+  private var audioChannelCount: Int = 0
 
   /// 样例与 Spectacular 常用：米/灰度量化（仅作语义对齐；实际深度以 Float 录制为准）
   private let jsonDepthScale: Double = 0.001
@@ -172,8 +180,9 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     outputDirectory.appendingPathComponent("frames2", isDirectory: true)
   }
 
-  init(outputDirectory: URL) {
+  init(outputDirectory: URL, enableAudio: Bool) {
     self.outputDirectory = outputDirectory
+    self.requestedAudioCapture = enableAudio
     motionQueue.name = "com.binwu.reconstruction.spatial_data_recorder.motion"
     motionQueue.maxConcurrentOperationCount = 1
     magnetometerQueue.name = "com.binwu.reconstruction.spatial_data_recorder.magnetometer"
@@ -194,9 +203,31 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
         }
         return
       }
-      self.syncQueue.async {
-        self.configureCaptureAndRun(completion: completion)
+      self.resolveAudioPermission { [weak self] granted in
+        guard let self = self else { return }
+        self.syncQueue.async {
+          self.audioPermissionGranted = granted
+          self.configureCaptureAndRun(completion: completion)
+        }
       }
+    }
+  }
+
+  private func resolveAudioPermission(completion: @escaping (Bool) -> Void) {
+    guard requestedAudioCapture else {
+      completion(false)
+      return
+    }
+    let status = AVCaptureDevice.authorizationStatus(for: .audio)
+    switch status {
+    case .authorized:
+      completion(true)
+    case .notDetermined:
+      AVCaptureDevice.requestAccess(for: .audio) { granted in
+        completion(granted)
+      }
+    default:
+      completion(false)
     }
   }
 
@@ -210,9 +241,14 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     timeOriginMedia = 0
     assetWriter = nil
     videoInput = nil
+    audioInput = nil
     assetWriter2 = nil
     videoInput2 = nil
     pendingJsonl.removeAll(keepingCapacity: true)
+    didAppendAudioSample = false
+    audioSampleRate = 0
+    audioChannelCount = 0
+    audioCaptureEnabled = requestedAudioCapture && audioPermissionGranted
 
     if configureDepthAndWideSession() {
       captureMode = .depthAndWide
@@ -260,6 +296,28 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     } else {
       try? fm.removeItem(at: frames2DirectoryURL)
     }
+  }
+
+  private func addAudioCaptureIfPossible(to session: AVCaptureSession) {
+    audioOutput = nil
+    guard audioCaptureEnabled,
+          let device = AVCaptureDevice.default(for: .audio),
+          let input = try? AVCaptureDeviceInput(device: device),
+          session.canAddInput(input)
+    else {
+      audioCaptureEnabled = false
+      return
+    }
+    session.addInput(input)
+
+    let output = AVCaptureAudioDataOutput()
+    output.setSampleBufferDelegate(self, queue: videoQueue)
+    guard session.canAddOutput(output) else {
+      audioCaptureEnabled = false
+      return
+    }
+    session.addOutput(output)
+    audioOutput = output
   }
 
   /// LiDAR：同步广角 RGB + 深度图（优先，与样例第二路 gray + depthScale 一致）
@@ -313,6 +371,8 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     if let conn = vOut.connection(with: .video) {
       Self.configureVideoConnection(conn)
     }
+
+    addAudioCaptureIfPossible(to: session)
 
     session.commitConfiguration()
 
@@ -565,6 +625,8 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       Self.configureVideoConnection(conn)
     }
 
+    addAudioCaptureIfPossible(to: session)
+
     session.commitConfiguration()
 
     captureSession = session
@@ -622,6 +684,8 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     if let conn = output.connection(with: .video) {
       Self.configureVideoConnection(conn)
     }
+
+    addAudioCaptureIfPossible(to: session)
 
     captureSession = session
     captureDevice = device
@@ -781,6 +845,10 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
   ) {
     syncQueue.async { [weak self] in
       guard let self = self else { return }
+      if output === self.audioOutput {
+        self.processAudioSampleBuffer(sampleBuffer)
+        return
+      }
       switch self.captureMode {
       case .singleWide:
         if output === self.videoOutput {
@@ -791,6 +859,31 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       case .depthAndWide:
         break
       }
+    }
+  }
+
+  private func processAudioSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
+    guard audioCaptureEnabled, !isStopping, didStartWriter else { return }
+    guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
+    guard
+      let input = audioInput,
+      let writer = assetWriter,
+      writer.status == .writing,
+      input.isReadyForMoreMediaData
+    else {
+      return
+    }
+
+    if audioSampleRate <= 0 || audioChannelCount <= 0,
+       let format = CMSampleBufferGetFormatDescription(sampleBuffer),
+       let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(format)
+    {
+      audioSampleRate = asbd.pointee.mSampleRate
+      audioChannelCount = Int(asbd.pointee.mChannelsPerFrame)
+    }
+
+    if input.append(sampleBuffer) {
+      didAppendAudioSample = true
     }
   }
 
@@ -873,6 +966,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
         assetWriter2?.cancelWriting()
         assetWriter = nil
         videoInput = nil
+        audioInput = nil
         assetWriter2 = nil
         videoInput2 = nil
         firstVideoPts = nil
@@ -1109,6 +1203,20 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
         return false
       }
       writer.add(input)
+
+      if audioCaptureEnabled {
+        let audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: nil)
+        audioInput.expectsMediaDataInRealTime = true
+        if writer.canAdd(audioInput) {
+          writer.add(audioInput)
+          self.audioInput = audioInput
+        } else {
+          self.audioInput = nil
+          audioCaptureEnabled = false
+        }
+      } else {
+        self.audioInput = nil
+      }
       guard writer.startWriting() else {
         return false
       }
@@ -1427,10 +1535,12 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
 
     videoOutput?.setSampleBufferDelegate(nil, queue: nil)
     secondVideoOutput?.setSampleBufferDelegate(nil, queue: nil)
+    audioOutput?.setSampleBufferDelegate(nil, queue: nil)
     captureSession?.stopRunning()
     captureSession = nil
     videoOutput = nil
     secondVideoOutput = nil
+    audioOutput = nil
     depthOutput = nil
     captureDevice = nil
     secondCaptureDevice = nil
@@ -1441,6 +1551,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       guard let self = self else { return }
       self.assetWriter = nil
       self.videoInput = nil
+      self.audioInput = nil
       self.assetWriter2 = nil
       self.videoInput2 = nil
 
@@ -1454,6 +1565,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       guard let self = self else { return }
       self.assetWriter = nil
       self.videoInput = nil
+      self.audioInput = nil
       self.assetWriter2 = nil
       self.videoInput2 = nil
 
@@ -1525,6 +1637,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       }
 
       input.markAsFinished()
+      audioInput?.markAsFinished()
       writer.finishWriting { [weak self] in
         guard let self = self else { return }
         self.syncQueue.async {
@@ -1542,6 +1655,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     } else {
       assetWriter = nil
       videoInput = nil
+      audioInput = nil
       assetWriter2 = nil
       videoInput2 = nil
       finalizeFailure(SlamRecordingError.writerSetupFailed("no_video_writer_started"))
@@ -1776,6 +1890,12 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       "platform": "ios",
       "capture_mode": captureModeName,
       "depth_mode_required": requireDepthAndWideMode,
+      "audio_enabled": audioCaptureEnabled,
+      "audio_permission_granted": audioPermissionGranted,
+      "audio_track_expected": requestedAudioCapture,
+      "audio_track_present": didAppendAudioSample,
+      "audio_sample_rate": audioSampleRate,
+      "audio_channel_count": audioChannelCount,
     ]
     writeJsonFile(name: "metadata.json", object: root)
   }

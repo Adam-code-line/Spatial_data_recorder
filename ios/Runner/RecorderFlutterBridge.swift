@@ -89,11 +89,12 @@ final class RecorderFlutterBridge {
         )
         return
       }
+      let enableAudio = (args["enableAudio"] as? Bool) ?? true
 
       let url = URL(fileURLWithPath: path, isDirectory: true)
       notifySessionChanged()
       previewController.stop()
-      let s = SlamRecordingSession(outputDirectory: url)
+      let s = SlamRecordingSession(outputDirectory: url, enableAudio: enableAudio)
       s.start { [weak self] error in
         if let error = error {
           self?.previewController.start(requestPermission: false) { ok in
