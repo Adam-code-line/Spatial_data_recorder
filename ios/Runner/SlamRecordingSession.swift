@@ -166,6 +166,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
   private static let depthVisualizationFarMeters: Float = 5.0
   private static let targetVideoWidth = 1920
   private static let targetVideoHeight = 1440
+  private static let targetCaptureFps: Double = 30
 
   private var frames2DirectoryURL: URL {
     outputDirectory.appendingPathComponent("frames2", isDirectory: true)
@@ -279,6 +280,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
         device.activeDepthDataFormat = depthFormat
       }
       Self.disableHdrIfPossible(device: device)
+      Self.lockFrameRateIfPossible(device: device)
       device.unlockForConfiguration()
     } catch {
       session.commitConfiguration()
@@ -308,8 +310,8 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     session.addOutput(vOut)
     session.addOutput(dOut)
 
-    if let conn = vOut.connection(with: .video), conn.isCameraIntrinsicMatrixDeliverySupported {
-      conn.isCameraIntrinsicMatrixDeliveryEnabled = true
+    if let conn = vOut.connection(with: .video) {
+      Self.configureVideoConnection(conn)
     }
 
     session.commitConfiguration()
@@ -454,6 +456,35 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     }
   }
 
+  /// Lock to a stable frame rate to reduce capture jitter that can hurt SLAM tracking.
+  private static func lockFrameRateIfPossible(device: AVCaptureDevice, preferredFps: Double = targetCaptureFps) {
+    let ranges = device.activeFormat.videoSupportedFrameRateRanges
+    guard !ranges.isEmpty, preferredFps > 0 else { return }
+
+    let fps: Double
+    if ranges.contains(where: { $0.minFrameRate <= preferredFps && preferredFps <= $0.maxFrameRate }) {
+      fps = preferredFps
+    } else if let maxRange = ranges.max(by: { $0.maxFrameRate < $1.maxFrameRate }) {
+      fps = maxRange.maxFrameRate
+    } else {
+      return
+    }
+
+    guard fps.isFinite, fps > 0 else { return }
+    let frameDuration = CMTime(value: 1, timescale: Int32(max(1, Int(fps.rounded()))))
+    device.activeVideoMinFrameDuration = frameDuration
+    device.activeVideoMaxFrameDuration = frameDuration
+  }
+
+  private static func configureVideoConnection(_ connection: AVCaptureConnection) {
+    if connection.isCameraIntrinsicMatrixDeliverySupported {
+      connection.isCameraIntrinsicMatrixDeliveryEnabled = true
+    }
+    if connection.isVideoStabilizationSupported {
+      connection.preferredVideoStabilizationMode = .off
+    }
+  }
+
   /// 双路 RGB：广角 + 超广角（无 LiDAR 深度时）
   private func configureMultiCamSession() -> Bool {
     guard
@@ -475,6 +506,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       try wide.lockForConfiguration()
       wide.activeFormat = wideFormat
       Self.disableHdrIfPossible(device: wide)
+      Self.lockFrameRateIfPossible(device: wide)
       wide.unlockForConfiguration()
     } catch {
       return false
@@ -484,6 +516,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       try ultra.lockForConfiguration()
       ultra.activeFormat = ultraFormat
       Self.disableHdrIfPossible(device: ultra)
+      Self.lockFrameRateIfPossible(device: ultra)
       ultra.unlockForConfiguration()
     } catch {
       return false
@@ -525,11 +558,11 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     session.addOutput(outWide)
     session.addOutput(outUltra)
 
-    if let conn = outWide.connection(with: .video), conn.isCameraIntrinsicMatrixDeliverySupported {
-      conn.isCameraIntrinsicMatrixDeliveryEnabled = true
+    if let conn = outWide.connection(with: .video) {
+      Self.configureVideoConnection(conn)
     }
-    if let conn = outUltra.connection(with: .video), conn.isCameraIntrinsicMatrixDeliverySupported {
-      conn.isCameraIntrinsicMatrixDeliveryEnabled = true
+    if let conn = outUltra.connection(with: .video) {
+      Self.configureVideoConnection(conn)
     }
 
     session.commitConfiguration()
@@ -562,6 +595,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       try device.lockForConfiguration()
       device.activeFormat = preferredFormat
       Self.disableHdrIfPossible(device: device)
+      Self.lockFrameRateIfPossible(device: device)
       device.unlockForConfiguration()
     } catch {
       return false
@@ -585,8 +619,8 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     guard session.canAddOutput(output) else { return false }
     session.addOutput(output)
 
-    if let conn = output.connection(with: .video), conn.isCameraIntrinsicMatrixDeliverySupported {
-      conn.isCameraIntrinsicMatrixDeliveryEnabled = true
+    if let conn = output.connection(with: .video) {
+      Self.configureVideoConnection(conn)
     }
 
     captureSession = session
