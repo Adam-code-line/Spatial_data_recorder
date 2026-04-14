@@ -32,6 +32,34 @@ Future<UploadSessionContext?> showUploadSessionContextDialog({
         defaults: defaults,
         audioTrackPresent: audioTrackPresent,
         contextService: contextService,
+        mode: _UploadSessionDialogMode.upload,
+      );
+    },
+  );
+}
+
+Future<UploadSessionContext?> showRecordingSessionContextDialog({
+  required BuildContext context,
+  required String sessionPath,
+  required UploadSessionContextService contextService,
+}) async {
+  final existing = await contextService.readForSession(sessionPath);
+  final defaults = await contextService.readDefaults(sessionPath);
+  if (!context.mounted) {
+    return null;
+  }
+
+  return showDialog<UploadSessionContext>(
+    context: context,
+    barrierDismissible: false,
+    builder: (dialogContext) {
+      return _UploadSessionContextDialog(
+        sessionName: p.basename(sessionPath),
+        existing: existing,
+        defaults: defaults,
+        audioTrackPresent: false,
+        contextService: contextService,
+        mode: _UploadSessionDialogMode.recordingSetup,
       );
     },
   );
@@ -44,6 +72,7 @@ class _UploadSessionContextDialog extends StatefulWidget {
     required this.defaults,
     required this.audioTrackPresent,
     required this.contextService,
+    required this.mode,
   });
 
   final String sessionName;
@@ -51,6 +80,7 @@ class _UploadSessionContextDialog extends StatefulWidget {
   final UploadSessionContext? defaults;
   final bool audioTrackPresent;
   final UploadSessionContextService contextService;
+  final _UploadSessionDialogMode mode;
 
   @override
   State<_UploadSessionContextDialog> createState() =>
@@ -72,6 +102,9 @@ class _UploadSessionContextDialogState
   late bool _reuseRecentGroup;
   late _GroupJoinMode _groupJoinMode;
   UploadGroupShare? _sharedJoinConfig;
+
+  bool get _isRecordingSetup =>
+      widget.mode == _UploadSessionDialogMode.recordingSetup;
 
   UploadSessionContext? get _defaults => widget.defaults;
   bool get _hasRecentScene =>
@@ -116,7 +149,7 @@ class _UploadSessionContextDialogState
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: const Text('上传设置'),
+      title: Text(_isRecordingSetup ? '录制前设置' : '上传设置'),
       content: SizedBox(
         width: 420,
         child: Form(
@@ -419,14 +452,18 @@ class _UploadSessionContextDialogState
                     ),
                   ),
                 ],
-                const SizedBox(height: 12),
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('音频状态'),
-                  subtitle: Text(
-                    widget.audioTrackPresent ? '本次录制已包含音频' : '本次录制无音频，但允许继续上传',
+                if (!_isRecordingSetup) ...[
+                  const SizedBox(height: 12),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('音频状态'),
+                    subtitle: Text(
+                      widget.audioTrackPresent
+                          ? '本次录制已包含音频'
+                          : '本次录制无音频，但允许继续上传',
+                    ),
                   ),
-                ),
+                ],
               ],
             ),
           ),
@@ -435,9 +472,12 @@ class _UploadSessionContextDialogState
       actions: [
         TextButton(
           onPressed: () => Navigator.of(context).pop(null),
-          child: const Text('仅保存'),
+          child: Text(_isRecordingSetup ? '取消' : '仅保存'),
         ),
-        FilledButton(onPressed: _submit, child: const Text('确认并上传')),
+        FilledButton(
+          onPressed: _submit,
+          child: Text(_isRecordingSetup ? '确认并开始录制' : '确认并上传'),
+        ),
       ],
     );
   }
@@ -609,6 +649,8 @@ class _UploadSessionContextDialogState
 }
 
 enum _GroupJoinMode { manualGroupId, shareCode }
+
+enum _UploadSessionDialogMode { recordingSetup, upload }
 
 class _GroupShareQrDialog extends StatelessWidget {
   const _GroupShareQrDialog({required this.share});

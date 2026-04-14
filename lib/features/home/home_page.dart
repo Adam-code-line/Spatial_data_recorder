@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -171,6 +172,19 @@ class _HomePageState extends ConsumerState<HomePage> {
       }
 
       final dir = await createSessionDirectory();
+      final contextService = ref.read(uploadSessionContextServiceProvider);
+      final recordingContext = await showRecordingSessionContextDialog(
+        context: context,
+        sessionPath: dir.path,
+        contextService: contextService,
+      );
+      if (recordingContext == null) {
+        if (await dir.exists()) {
+          await dir.delete(recursive: true);
+        }
+        return;
+      }
+      await contextService.writeForSession(dir.path, recordingContext);
 
       await ref
           .read(recorderPlatformProvider)
@@ -212,38 +226,16 @@ class _HomePageState extends ConsumerState<HomePage> {
 
       final contextService = ref.read(uploadSessionContextServiceProvider);
       await _refreshStatus();
-      final defaultContext = await contextService.ensureContextForSession(
+      final existingContext = await contextService.ensureContextForSession(
         sessionPath,
       );
-      if (mounted) {
-        setState(() {
-          _busy = false;
-        });
-      }
-      if (!mounted) return;
-      final uploadContext = await showUploadSessionContextDialog(
-        context: context,
-        sessionPath: sessionPath,
-        contextService: contextService,
+      final syncedContext = existingContext.copyWith(
+        audioTrackPresent: await contextService.readAudioTrackPresent(sessionPath),
       );
-
-      var uploadMessage = '录制已完成，仅保存到本地。';
-      if (uploadContext != null) {
-        try {
-          await contextService.writeForSession(sessionPath, uploadContext);
-          final enqueueResult = await ref
-              .read(uploadQueueControllerProvider.notifier)
-              .enqueueSession(sessionPath);
-          uploadMessage = _enqueueMessage(enqueueResult);
-        } catch (e) {
-          uploadMessage = '录制已完成，但加入上传队列失败：$e';
-        }
-      } else {
-        await contextService.writeForSession(sessionPath, defaultContext);
-      }
+      await contextService.writeForSession(sessionPath, syncedContext);
 
       if (mounted) {
-        _toast('已停止录制，$uploadMessage');
+        _toast('已停止录制，已保存到本地。可在文件页按 scene/seq 分组查看并上传。');
       }
     } catch (e) {
       await _refreshStatus();
