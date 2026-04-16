@@ -31,9 +31,6 @@ class UploadHttpClient {
         ),
         'sessionName': task.sessionName,
         'sessionPath': task.sessionPath,
-        if (sessionContext?.captureName case final captureName?
-            when captureName.isNotEmpty)
-          'captureName': captureName,
         if (sessionContext != null) 'sceneName': sessionContext.sceneName,
         if (sessionContext != null) 'seqName': sessionContext.seqName,
         if (sessionContext != null)

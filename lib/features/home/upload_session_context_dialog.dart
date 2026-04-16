@@ -90,7 +90,6 @@ class _UploadSessionContextDialog extends StatefulWidget {
 class _UploadSessionContextDialogState
     extends State<_UploadSessionContextDialog> {
   final _formKey = GlobalKey<FormState>();
-  late final TextEditingController _captureNameController;
   late final TextEditingController _sceneController;
   late final TextEditingController _seqController;
   late final TextEditingController _groupController;
@@ -123,9 +122,6 @@ class _UploadSessionContextDialogState
     final seed = widget.existing ?? widget.defaults;
     _captureType = seed?.captureType ?? UploadCaptureType.sceneOnly;
     _cam = seed?.cam ?? (_captureType == UploadCaptureType.humanInScene ? UploadCam.A : null);
-    _captureNameController = TextEditingController(
-      text: widget.existing?.captureName ?? widget.defaults?.captureName ?? '',
-    );
     _sceneController = TextEditingController(
       text: widget.existing?.sceneName ?? '',
     );
@@ -145,7 +141,6 @@ class _UploadSessionContextDialogState
 
   @override
   void dispose() {
-    _captureNameController.dispose();
     _sceneController.dispose();
     _seqController.dispose();
     _groupController.dispose();
@@ -169,32 +164,6 @@ class _UploadSessionContextDialogState
                 Text(
                   widget.sessionName,
                   style: Theme.of(context).textTheme.bodySmall,
-                ),
-                const SizedBox(height: 12),
-                TextFormField(
-                  controller: _captureNameController,
-                  enabled: _sharedJoinConfig == null ||
-                      _sharedJoinConfig!.captureName == null ||
-                      _sharedJoinConfig!.captureName!.trim().isEmpty,
-                  decoration: const InputDecoration(
-                    labelText: '上传名（captureName）',
-                    border: OutlineInputBorder(),
-                  ),
-                  validator: (value) {
-                    final shareCaptureName = _sharedJoinConfig?.captureName;
-                    if (shareCaptureName != null &&
-                        shareCaptureName.trim().isNotEmpty) {
-                      return null;
-                    }
-                    final trimmed = value?.trim() ?? '';
-                    if (trimmed.isEmpty) {
-                      return null;
-                    }
-                    if (!widget.contextService.isValidSegment(trimmed)) {
-                      return '仅支持字母、数字、点、下划线、短横线，且必须以字母或数字开头';
-                    }
-                    return null;
-                  },
                 ),
                 const SizedBox(height: 12),
                 DropdownButtonFormField<UploadCaptureType>(
@@ -501,9 +470,6 @@ class _UploadSessionContextDialogState
                         children: [
                           const Text('已导入共享配置'),
                           const SizedBox(height: 6),
-                          if (_sharedJoinConfig!.captureName != null &&
-                              _sharedJoinConfig!.captureName!.isNotEmpty)
-                            Text('Capture: ${_sharedJoinConfig!.captureName}'),
                           Text('Scene: ${_sharedJoinConfig!.sceneName}'),
                           Text('Seq: ${_sharedJoinConfig!.seqName}'),
                           Text('Group: ${_sharedJoinConfig!.pairGroupId}'),
@@ -603,13 +569,7 @@ class _UploadSessionContextDialogState
                       ),
                     )));
 
-    final captureName =
-        shareConfig?.captureName?.trim().isNotEmpty == true
-            ? shareConfig!.captureName!.trim()
-            : _resolveOptionalSegment(_captureNameController.text);
-
     final sessionContext = UploadSessionContext(
-      captureName: captureName,
       captureType: shareConfig?.captureType ?? _captureType,
       sceneName: sceneName,
       seqName: seqName,
@@ -627,14 +587,6 @@ class _UploadSessionContextDialogState
       return normalized;
     }
     return generatedFallback;
-  }
-
-  String? _resolveOptionalSegment(String rawValue) {
-    final normalized = widget.contextService.normalizeSegment(rawValue);
-    if (normalized.isEmpty) {
-      return null;
-    }
-    return normalized;
   }
 
   void _applyShareCodeFromInput() {
@@ -678,9 +630,6 @@ class _UploadSessionContextDialogState
       _sharedJoinConfig = share;
       _captureType = share.captureType;
       _cam = share.captureType == UploadCaptureType.humanInScene ? UploadCam.B : null;
-      if (share.captureName != null && share.captureName!.trim().isNotEmpty) {
-        _captureNameController.text = share.captureName!.trim();
-      }
       _sceneController.text = share.sceneName;
       _seqController.text = share.seqName;
       _groupController.text = share.pairGroupId;
@@ -710,10 +659,6 @@ class _UploadSessionContextDialogState
       return null;
     }
     final captureType = _sharedJoinConfig?.captureType ?? _captureType;
-    final captureName =
-        _sharedJoinConfig?.captureName?.trim().isNotEmpty == true
-            ? _sharedJoinConfig!.captureName!.trim()
-            : _resolveOptionalSegment(_captureNameController.text);
     final sceneName =
         _sharedJoinConfig?.sceneName ??
         (_reuseRecentScene && _hasRecentScene
@@ -749,13 +694,7 @@ class _UploadSessionContextDialogState
         !widget.contextService.isValidSegment(pairGroupId)) {
       return null;
     }
-    if (captureName != null &&
-        captureName.isNotEmpty &&
-        !widget.contextService.isValidSegment(captureName)) {
-      return null;
-    }
     return UploadGroupShare(
-      captureName: captureName,
       captureType: captureType,
       sceneName: sceneName,
       seqName: seqName,
@@ -779,11 +718,6 @@ class _UploadSessionContextDialogState
       return false;
     }
     if (!widget.contextService.isValidSegment(share.pairGroupId)) {
-      return false;
-    }
-    if (share.captureName != null &&
-        share.captureName!.isNotEmpty &&
-        !widget.contextService.isValidSegment(share.captureName!)) {
       return false;
     }
     return true;
@@ -818,8 +752,6 @@ class _GroupShareQrDialog extends StatelessWidget {
           children: [
             Center(child: QrImageView(data: shareCode, size: 220)),
             const SizedBox(height: 12),
-            if (share.captureName != null && share.captureName!.isNotEmpty)
-              Text('Capture: ${share.captureName}'),
             Text('Scene: ${share.sceneName}'),
             Text('Seq: ${share.seqName}'),
             Text('Group: ${share.pairGroupId}'),
