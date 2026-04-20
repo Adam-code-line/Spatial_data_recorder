@@ -1264,8 +1264,10 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     if isDepthGray || secondSample != nil {
       var frame1: [String: Any] = [
         "cameraInd": 1,
-        "aligned": true,
       ]
+      if isDepthGray {
+        frame1["aligned"] = true
+      }
 
       let secondaryOffsetSeconds: Double = {
         guard let sb2 = secondSample else { return 0 }
@@ -1766,7 +1768,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
   private func writeJsonFile(name: String, object: [String: Any]) {
     let url = outputDirectory.appendingPathComponent(name)
     guard JSONSerialization.isValidJSONObject(object),
-          let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+          let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     else {
       return
     }

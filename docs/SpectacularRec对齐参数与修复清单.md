@@ -22,6 +22,9 @@
 - `metadata.json`：最小元数据（样例只有 `device_model` / `platform`）
 - `frames2/*.png`：深度逐帧 PNG（16-bit gray）
 
+> 说明：本项目的产品诉求是“尽量与 Spectacular Rec 对齐，但允许保留音频做额外处理”。  
+> 推荐做法是：**提供给 Spectacular CLI 处理的目录仍保持 `data.mov` 无音轨**；音频以额外文件或额外导出版本保留（见 §3.2、§4-P0-2、§5-2）。
+
 ### 2.2 深度帧序列 `frames2/*.png`
 
 样例特征（可以用 PNG 头部直接验证）：
@@ -74,7 +77,7 @@
 ### 3.1 深度 PNG 分辨率不一致（关键）
 
 - `spec/frames2`：256×192
-- `ours/frames2`：320×240
+- `ours/frames2`：历史产物曾出现 320×240（取决于设备支持的 depth format）
 
 这通常不是“时长差异”，而是**深度流格式（activeDepthDataFormat）未对齐**导致的。
 
@@ -83,7 +86,11 @@
 - `spec/data.mov`：仅 H.264 视频
 - `ours/data.mov`：额外包含 44.1kHz 单声道 PCM 音轨
 
-对齐目标是 **移除音轨**，保持与样例一致。
+对齐目标（用于 Spectacular CLI 输入）是：**让“给 CLI 的 `data.mov`”无音轨**，保持与样例一致。  
+但你可以仍然**保留音频用于额外处理**，推荐两种策略（择一）：
+
+1) **保留音频为额外文件（推荐）**：例如 `audio.m4a` / `audio.wav`（与 `data.mov` 同起点时间轴），`data.mov` 保持纯视频。
+2) **保留音频在原始 `data.mov`，但导出一个无音轨版本给 CLI**：例如 `data_cli.mov`（仅视频流），用于 Spectacular CLI 处理。
 
 ### 3.3 `data.mov` 标称帧率 / 帧间隔抖动（关键）
 
@@ -98,7 +105,8 @@
 
 `ours` 写入了 `audio_*`、`capture_mode`、`depth_mode_required` 等字段，`spec` 没有。
 
-如果目标是“完全复刻样例”，应将 `metadata.json` 收敛到样例 schema（或把扩展字段写到另一个文件）。
+如果目标是“完全复刻样例”，应将 `metadata.json` 收敛到样例 schema（或把扩展字段写到另一个文件）。  
+（补充：当前仓库已倾向于让 `metadata.json` 保持最小字段集；若后续要记录音频相关信息，建议写入独立文件，而不要污染 `metadata.json`。）
 
 ### 3.5 两路内参与 aligned 行为不一致（关键）
 
@@ -138,13 +146,14 @@
 
 ### P0（必须先修，直接导致格式不对齐）
 
-1. **深度 `frames2/*.png` 分辨率固定到 256×192**
+1. **深度 `frames2/*.png` 分辨率固定/优先到 256×192（并持续回归抽检）**
    - 模块：`ios/Runner/SlamRecordingSession.swift`
-   - 重点：优先选择 `activeDepthDataFormat` 中 **256×192** 的 depth format
+   - 重点：优先选择 `activeDepthDataFormat` 中 **256×192** 的 depth format；若设备不支持需明确回退策略
 
-2. **去掉 `data.mov` 的音轨**
-   - 模块：`ios/Runner/RecorderFlutterBridge.swift` / Flutter 启动参数
-   - 重点：录制时不要创建/写入 `AVAssetWriterInput(mediaType: .audio)`
+2. **给 Spectacular CLI 的 `data.mov` 保持无音轨；音频作为“额外处理”保留**
+   - 目标：输入给 Spectacular CLI 的目录结构与样例一致（`data.mov` 仅视频流）
+   - 推荐方案：录制时将音频写入 `audio.m4a`/`audio.wav`（sidecar），`data.mov` 始终纯视频
+   - 无代码方案：保留原始带音轨 `data.mov`，但导出 `data_cli.mov`（仅视频流）供 CLI 使用
 
 3. **确保视频采集锁到 30fps，避免 60fps 丢帧**
    - 模块：`ios/Runner/SlamRecordingSession.swift`
@@ -178,9 +187,10 @@
 1. **检查 frames2 PNG 规格**
    - 任取 `frames2/00000000.png`，校验 IHDR：`256x192`、`bitDepth=16`、`colorType=0`
 
-2. **检查 data.mov 是否无音轨**
+2. **检查“给 Spectacular CLI 的 data.mov”是否无音轨**
    - 用 `ffprobe -hide_banner -show_streams data.mov`（或你们内部脚本）
    - 期望仅有 1 条 video stream，且 `codec_name=h264`
+   - 若你保留了原始带音轨版本：请确保额外导出 `data_cli.mov`（无音轨）并在 CLI 输入目录中命名为 `data.mov`
 
 3. **检查帧率与抖动**
    - `r_frame_rate` 期望 30/1
