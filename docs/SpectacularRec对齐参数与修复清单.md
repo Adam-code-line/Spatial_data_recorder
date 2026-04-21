@@ -81,16 +81,14 @@
 
 这通常不是“时长差异”，而是**深度流格式（activeDepthDataFormat）未对齐**导致的。
 
-### 3.2 `data.mov` 多出音轨（关键）
+### 3.2 `data.mov` 音轨策略（关键，当前实现已对齐）
 
-- `spec/data.mov`：仅 H.264 视频
-- `ours/data.mov`：额外包含 44.1kHz 单声道 PCM 音轨
+- `spec/data.mov`：仅 H.264 视频（无音轨）
+- `ours/data.mov`：仅 H.264 视频（无音轨，作为工具链/CLI 输入）
+- `ours/data_with_audio.mov`：可选，H.264 视频 + 音频轨（用于回放/现场记录/额外处理）
 
 对齐目标（用于 Spectacular CLI 输入）是：**让“给 CLI 的 `data.mov`”无音轨**，保持与样例一致。  
-但你可以仍然**保留音频用于额外处理**，推荐两种策略（择一）：
-
-1) **保留音频为额外文件（推荐）**：例如 `audio.m4a` / `audio.wav`（与 `data.mov` 同起点时间轴），`data.mov` 保持纯视频。
-2) **保留音频在原始 `data.mov`，但导出一个无音轨版本给 CLI**：例如 `data_cli.mov`（仅视频流），用于 Spectacular CLI 处理。
+当前实现采用“**双产物**”策略：`data.mov` 永远纯视频；若开启音频且成功录到，会额外导出 `data_with_audio.mov`。
 
 ### 3.3 `data.mov` 标称帧率 / 帧间隔抖动（关键）
 
@@ -101,12 +99,10 @@
 
 这通常意味着**实际采集或 activeFormat 锁到了 60fps**，但写入端丢帧导致平均帧率接近 30。
 
-### 3.4 `metadata.json` schema 不一致（关键）
+### 3.4 `metadata.json` schema 不一致（关键，当前实现已对齐）
 
-`ours` 写入了 `audio_*`、`capture_mode`、`depth_mode_required` 等字段，`spec` 没有。
-
-如果目标是“完全复刻样例”，应将 `metadata.json` 收敛到样例 schema（或把扩展字段写到另一个文件）。  
-（补充：当前仓库已倾向于让 `metadata.json` 保持最小字段集；若后续要记录音频相关信息，建议写入独立文件，而不要污染 `metadata.json`。）
+样例 `metadata.json` 极简（`device_model` / `platform`）。  
+本项目当前实现也保持 `metadata.json` 为最小字段集；若需要记录音频/上传业务字段，建议写入独立文件（例如 `upload_context.json`），避免污染样例合同。
 
 ### 3.5 两路内参与 aligned 行为不一致（关键）
 
@@ -152,8 +148,8 @@
 
 2. **给 Spectacular CLI 的 `data.mov` 保持无音轨；音频作为“额外处理”保留**
    - 目标：输入给 Spectacular CLI 的目录结构与样例一致（`data.mov` 仅视频流）
-   - 推荐方案：录制时将音频写入 `audio.m4a`/`audio.wav`（sidecar），`data.mov` 始终纯视频
-   - 无代码方案：保留原始带音轨 `data.mov`，但导出 `data_cli.mov`（仅视频流）供 CLI 使用
+   - 推荐方案：`data.mov` 始终纯视频；若需要音频，额外导出 `data_with_audio.mov`（或保留 `audio.m4a` sidecar）用于额外处理
+   - 旧数据兼容：若你已有“带音轨的 `data.mov`”，可额外导出 `data_cli.mov`（仅视频流）供 CLI 使用
 
 3. **确保视频采集锁到 30fps，避免 60fps 丢帧**
    - 模块：`ios/Runner/SlamRecordingSession.swift`
@@ -190,7 +186,7 @@
 2. **检查“给 Spectacular CLI 的 data.mov”是否无音轨**
    - 用 `ffprobe -hide_banner -show_streams data.mov`（或你们内部脚本）
    - 期望仅有 1 条 video stream，且 `codec_name=h264`
-   - 若你保留了原始带音轨版本：请确保额外导出 `data_cli.mov`（无音轨）并在 CLI 输入目录中命名为 `data.mov`
+   - 若你需要音频：检查是否生成了 `data_with_audio.mov`；若是旧数据/外部视频仍带音轨，可导出无音轨版本供 CLI 使用（如 `data_cli.mov`）
 
 3. **检查帧率与抖动**
    - `r_frame_rate` 期望 30/1

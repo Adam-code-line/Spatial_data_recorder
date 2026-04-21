@@ -13,7 +13,8 @@
 
 ## 录制输出文件（典型）
 
-- `data.mov`：主视频
+- `data.mov`：主视频（无音轨，Spectacular-compatible）
+- `data_with_audio.mov`：主视频 + 音频（可选；开启音频且导出成功时生成）
 - `data2.mov`：第二路视频（设备/模式支持时生成）
 - `data.jsonl`：时间序列数据（帧与传感器）
 - `calibration.json`：相机标定参数

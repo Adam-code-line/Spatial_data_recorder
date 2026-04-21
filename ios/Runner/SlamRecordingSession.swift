@@ -1,4 +1,5 @@
 import AVFoundation
+import AudioToolbox
 import CoreImage
 import CoreMotion
 import CoreVideo
@@ -113,9 +114,10 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
 
   private var assetWriter: AVAssetWriter?
   private var videoInput: AVAssetWriterInput?
-  private var audioInput: AVAssetWriterInput?
   private var assetWriter2: AVAssetWriter?
   private var videoInput2: AVAssetWriterInput?
+  private var audioWriter: AVAssetWriter?
+  private var audioWriterInput: AVAssetWriterInput?
 
   private var pendingJsonl: [PendingJsonlLine] = []
 
@@ -157,6 +159,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
   private var didStartWriter = false
   private var lastPrimaryWrittenPts: CMTime?
   private var lastSecondaryWrittenPts: CMTime?
+  private var lastAudioWrittenPts: CMTime?
   private var audioPermissionGranted = false
   private var audioCaptureEnabled = false
 
@@ -236,9 +239,10 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     timeOriginMedia = 0
     assetWriter = nil
     videoInput = nil
-    audioInput = nil
     assetWriter2 = nil
     videoInput2 = nil
+    audioWriter = nil
+    audioWriterInput = nil
     pendingJsonl.removeAll(keepingCapacity: true)
     audioCaptureEnabled = requestedAudioCapture && audioPermissionGranted
 
@@ -258,6 +262,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
 
     lastPrimaryWrittenPts = nil
     lastSecondaryWrittenPts = nil
+    lastAudioWrittenPts = nil
     isSecondaryRecordingEnabled = captureMode != .singleWide
     shouldExportFrames2PngSequence = true
     prepareFrames2DirectoryIfNeeded()
@@ -864,15 +869,69 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
   private func processAudioSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
     guard audioCaptureEnabled, !isStopping, didStartWriter else { return }
     guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
+    guard ensureAudioWriterReady(for: sampleBuffer) else { return }
     guard
-      let input = audioInput,
-      let writer = assetWriter,
+      let input = audioWriterInput,
+      let writer = audioWriter,
       writer.status == .writing,
       input.isReadyForMoreMediaData
     else {
       return
     }
-    _ = input.append(sampleBuffer)
+    if input.append(sampleBuffer) {
+      lastAudioWrittenPts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+    }
+  }
+
+  private static func audioStreamInfo(from sampleBuffer: CMSampleBuffer) -> (sampleRate: Float64, channelCount: Int)? {
+    guard let format = CMSampleBufferGetFormatDescription(sampleBuffer) else { return nil }
+    guard let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(format) else { return nil }
+    let sampleRate = asbd.pointee.mSampleRate
+    let channelCount = Int(asbd.pointee.mChannelsPerFrame)
+    guard sampleRate.isFinite, sampleRate > 0, channelCount > 0 else { return nil }
+    return (sampleRate: sampleRate, channelCount: channelCount)
+  }
+
+  private func ensureAudioWriterReady(for sampleBuffer: CMSampleBuffer) -> Bool {
+    guard audioCaptureEnabled, !isStopping, didStartWriter else { return false }
+    guard audioWriter == nil, audioWriterInput == nil else { return true }
+    guard let firstPts = firstVideoPts else { return false }
+    guard let info = Self.audioStreamInfo(from: sampleBuffer) else { return false }
+
+    let audioURL = outputDirectory.appendingPathComponent("audio.m4a")
+    try? FileManager.default.removeItem(at: audioURL)
+
+    do {
+      let writer = try AVAssetWriter(outputURL: audioURL, fileType: .m4a)
+      let audioSettings: [String: Any] = [
+        AVFormatIDKey: kAudioFormatMPEG4AAC,
+        AVSampleRateKey: info.sampleRate,
+        AVNumberOfChannelsKey: info.channelCount,
+        AVEncoderBitRateKey: 128_000,
+        AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
+      ]
+      let input = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+      input.expectsMediaDataInRealTime = true
+
+      guard writer.canAdd(input) else {
+        audioCaptureEnabled = false
+        return false
+      }
+      writer.add(input)
+      guard writer.startWriting() else {
+        audioCaptureEnabled = false
+        return false
+      }
+      writer.startSession(atSourceTime: firstPts)
+      audioWriter = writer
+      audioWriterInput = input
+      return true
+    } catch {
+      audioCaptureEnabled = false
+      audioWriter = nil
+      audioWriterInput = nil
+      return false
+    }
   }
 
   private func handleMultiCamOutput(output: AVCaptureOutput, sampleBuffer: CMSampleBuffer) {
@@ -952,11 +1011,13 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       guard input.append(sampleBuffer) else {
         writer.cancelWriting()
         assetWriter2?.cancelWriting()
+        audioWriter?.cancelWriting()
         assetWriter = nil
         videoInput = nil
-        audioInput = nil
         assetWriter2 = nil
         videoInput2 = nil
+        audioWriter = nil
+        audioWriterInput = nil
         firstVideoPts = nil
         didStartWriter = false
         lastPrimaryWrittenPts = nil
@@ -1120,6 +1181,13 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
 
     let movieURL = outputDirectory.appendingPathComponent("data.mov")
     try? FileManager.default.removeItem(at: movieURL)
+    let audioURL = outputDirectory.appendingPathComponent("audio.m4a")
+    try? FileManager.default.removeItem(at: audioURL)
+    let dataWithAudioURL = outputDirectory.appendingPathComponent("data_with_audio.mov")
+    try? FileManager.default.removeItem(at: dataWithAudioURL)
+
+    audioWriter = nil
+    audioWriterInput = nil
 
     do {
       let writer = try AVAssetWriter(outputURL: movieURL, fileType: .mov)
@@ -1142,20 +1210,6 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
         return false
       }
       writer.add(input)
-
-      if audioCaptureEnabled {
-        let audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: nil)
-        audioInput.expectsMediaDataInRealTime = true
-        if writer.canAdd(audioInput) {
-          writer.add(audioInput)
-          self.audioInput = audioInput
-        } else {
-          self.audioInput = nil
-          audioCaptureEnabled = false
-        }
-      } else {
-        self.audioInput = nil
-      }
       guard writer.startWriting() else {
         return false
       }
@@ -1401,6 +1455,106 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     return true
   }
 
+  private func exportDataWithAudioMovIfPossible(completion: @escaping () -> Void) {
+    guard lastAudioWrittenPts != nil else {
+      completion()
+      return
+    }
+
+    let videoURL = outputDirectory.appendingPathComponent("data.mov")
+    let audioURL = outputDirectory.appendingPathComponent("audio.m4a")
+    let outputURL = outputDirectory.appendingPathComponent("data_with_audio.mov")
+
+    let fm = FileManager.default
+    guard fm.fileExists(atPath: videoURL.path), fm.fileExists(atPath: audioURL.path) else {
+      completion()
+      return
+    }
+
+    try? fm.removeItem(at: outputURL)
+
+    let videoAsset = AVURLAsset(url: videoURL)
+    let audioAsset = AVURLAsset(url: audioURL)
+
+    let composition = AVMutableComposition()
+    guard let sourceVideoTrack = videoAsset.tracks(withMediaType: .video).first,
+          let sourceAudioTrack = audioAsset.tracks(withMediaType: .audio).first,
+          let compVideoTrack = composition.addMutableTrack(
+            withMediaType: .video,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+          ),
+          let compAudioTrack = composition.addMutableTrack(
+            withMediaType: .audio,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+          )
+    else {
+      completion()
+      return
+    }
+
+    do {
+      let videoDuration = videoAsset.duration
+      try compVideoTrack.insertTimeRange(
+        CMTimeRange(start: .zero, duration: videoDuration),
+        of: sourceVideoTrack,
+        at: .zero
+      )
+      compVideoTrack.preferredTransform = sourceVideoTrack.preferredTransform
+
+      let audioDuration = CMTimeCompare(audioAsset.duration, videoDuration) < 0 ? audioAsset.duration : videoDuration
+      try compAudioTrack.insertTimeRange(
+        CMTimeRange(start: .zero, duration: audioDuration),
+        of: sourceAudioTrack,
+        at: .zero
+      )
+    } catch {
+      completion()
+      return
+    }
+
+    func runExport(presetName: String, completion: @escaping (AVAssetExportSession?) -> Void) {
+      guard let exporter = AVAssetExportSession(asset: composition, presetName: presetName) else {
+        completion(nil)
+        return
+      }
+      exporter.outputURL = outputURL
+      exporter.outputFileType = .mov
+      exporter.exportAsynchronously {
+        completion(exporter)
+      }
+    }
+
+    runExport(presetName: AVAssetExportPresetPassthrough) { [weak self] exporter in
+      guard let self = self else { return }
+      self.syncQueue.async {
+        if exporter?.status == .completed {
+          try? fm.removeItem(at: audioURL)
+          completion()
+          return
+        }
+
+        if let error = exporter?.error {
+          print("[SLAM] passthrough export data_with_audio.mov failed: \(error)")
+        }
+        try? fm.removeItem(at: outputURL)
+
+        runExport(presetName: AVAssetExportPresetHighestQuality) { exporter in
+          self.syncQueue.async {
+            if exporter?.status == .completed {
+              try? fm.removeItem(at: audioURL)
+            } else {
+              if let error = exporter?.error {
+                print("[SLAM] re-encode export data_with_audio.mov failed: \(error)")
+              }
+              try? fm.removeItem(at: outputURL)
+            }
+            completion()
+          }
+        }
+      }
+    }
+  }
+
   func stop(completion: @escaping (Result<URL, Error>) -> Void) {
     syncQueue.async { [weak self] in
       self?.performStop(completion: completion)
@@ -1431,11 +1585,21 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
 
     let finalizeFailure: (Error) -> Void = { [weak self] error in
       guard let self = self else { return }
+      if let writer = self.assetWriter, writer.status == .writing || writer.status == .unknown {
+        writer.cancelWriting()
+      }
+      if let writer2 = self.assetWriter2, writer2.status == .writing || writer2.status == .unknown {
+        writer2.cancelWriting()
+      }
+      if let audioWriter = self.audioWriter, audioWriter.status == .writing || audioWriter.status == .unknown {
+        audioWriter.cancelWriting()
+      }
       self.assetWriter = nil
       self.videoInput = nil
-      self.audioInput = nil
       self.assetWriter2 = nil
       self.videoInput2 = nil
+      self.audioWriter = nil
+      self.audioWriterInput = nil
 
       DispatchQueue.main.async {
         UIApplication.shared.isIdleTimerDisabled = false
@@ -1447,9 +1611,10 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       guard let self = self else { return }
       self.assetWriter = nil
       self.videoInput = nil
-      self.audioInput = nil
       self.assetWriter2 = nil
       self.videoInput2 = nil
+      self.audioWriter = nil
+      self.audioWriterInput = nil
 
       guard self.hasValidRecordedVideos() else {
         finalizeFailure(SlamRecordingError.writerSetupFailed("invalid_video_resolution_metadata"))
@@ -1460,9 +1625,61 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       self.writeCalibrationJson()
       self.writeMetadataJson()
 
-      DispatchQueue.main.async {
-        UIApplication.shared.isIdleTimerDisabled = false
-        completion(.success(self.outputDirectory))
+      self.exportDataWithAudioMovIfPossible {
+        DispatchQueue.main.async {
+          UIApplication.shared.isIdleTimerDisabled = false
+          completion(.success(self.outputDirectory))
+        }
+      }
+    }
+
+    let finishAudioAndFinalize: () -> Void = { [weak self] in
+      guard let self = self else { return }
+      guard let input = self.audioWriterInput, let writer = self.audioWriter, self.didStartWriter else {
+        self.audioWriter = nil
+        self.audioWriterInput = nil
+        finalizeSuccess()
+        return
+      }
+
+      let audioURL = self.outputDirectory.appendingPathComponent("audio.m4a")
+
+      guard self.lastAudioWrittenPts != nil else {
+        if writer.status == .writing || writer.status == .unknown {
+          writer.cancelWriting()
+        }
+        self.audioWriter = nil
+        self.audioWriterInput = nil
+        try? FileManager.default.removeItem(at: audioURL)
+        finalizeSuccess()
+        return
+      }
+
+      if writer.status == .failed {
+        self.audioWriter = nil
+        self.audioWriterInput = nil
+        self.lastAudioWrittenPts = nil
+        try? FileManager.default.removeItem(at: audioURL)
+        finalizeSuccess()
+        return
+      }
+
+      input.markAsFinished()
+      writer.finishWriting { [weak self] in
+        guard let self = self else { return }
+        self.syncQueue.async {
+          guard writer.status == .completed else {
+            self.lastAudioWrittenPts = nil
+            try? FileManager.default.removeItem(at: audioURL)
+            self.audioWriter = nil
+            self.audioWriterInput = nil
+            finalizeSuccess()
+            return
+          }
+          self.audioWriter = nil
+          self.audioWriterInput = nil
+          finalizeSuccess()
+        }
       }
     }
 
@@ -1471,13 +1688,13 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       if let input2 = self.videoInput2, let w2 = self.assetWriter2, self.didStartWriter {
         guard self.lastSecondaryWrittenPts != nil else {
           self.discardSecondaryVideoOutput()
-          finalizeSuccess()
+          finishAudioAndFinalize()
           return
         }
 
         if w2.status == .failed {
           self.discardSecondaryVideoOutput()
-          finalizeSuccess()
+          finishAudioAndFinalize()
           return
         }
 
@@ -1487,14 +1704,14 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
           self.syncQueue.async {
             guard w2.status == .completed else {
               self.discardSecondaryVideoOutput()
-              finalizeSuccess()
+              finishAudioAndFinalize()
               return
             }
-            finalizeSuccess()
+            finishAudioAndFinalize()
           }
         }
       } else {
-        finalizeSuccess()
+        finishAudioAndFinalize()
       }
     }
 
@@ -1502,13 +1719,17 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       guard let lastPts = lastPrimaryWrittenPts else {
         writer.cancelWriting()
         assetWriter2?.cancelWriting()
+        audioWriter?.cancelWriting()
         assetWriter = nil
         videoInput = nil
         assetWriter2 = nil
         videoInput2 = nil
+        audioWriter = nil
+        audioWriterInput = nil
         didStartWriter = false
         firstVideoPts = nil
         lastSecondaryWrittenPts = nil
+        lastAudioWrittenPts = nil
         finalizeFailure(SlamRecordingError.writerSetupFailed("no_video_samples_captured"))
         return
       }
@@ -1519,7 +1740,6 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       }
 
       input.markAsFinished()
-      audioInput?.markAsFinished()
       writer.finishWriting { [weak self] in
         guard let self = self else { return }
         self.syncQueue.async {
@@ -1537,9 +1757,10 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     } else {
       assetWriter = nil
       videoInput = nil
-      audioInput = nil
       assetWriter2 = nil
       videoInput2 = nil
+      audioWriter = nil
+      audioWriterInput = nil
       finalizeFailure(SlamRecordingError.writerSetupFailed("no_video_writer_started"))
     }
   }
