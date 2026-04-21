@@ -14,7 +14,13 @@ class UploadSessionContextService {
 
   Future<UploadSessionContext> ensureContextForSession(String sessionPath) async {
     final existing = await readForSession(sessionPath);
+    final audioTrackPresent = await readAudioTrackPresent(sessionPath);
     if (existing != null) {
+      if (existing.audioTrackPresent != audioTrackPresent) {
+        final refreshed = existing.copyWith(audioTrackPresent: audioTrackPresent);
+        await writeForSession(sessionPath, refreshed);
+        return refreshed;
+      }
       return existing;
     }
 
@@ -22,7 +28,7 @@ class UploadSessionContextService {
       captureType: UploadCaptureType.sceneOnly,
       sceneName: generateSceneName(p.basename(sessionPath)),
       seqName: generateSeqName(p.basename(sessionPath)),
-      audioTrackPresent: await readAudioTrackPresent(sessionPath),
+      audioTrackPresent: audioTrackPresent,
       confirmedAt: DateTime.now().toUtc(),
     );
     await writeForSession(sessionPath, created);
@@ -87,19 +93,8 @@ class UploadSessionContextService {
   }
 
   Future<bool> readAudioTrackPresent(String sessionPath) async {
-    final file = File(p.join(sessionPath, 'metadata.json'));
-    if (!await file.exists()) {
-      return false;
-    }
-    try {
-      final decoded = jsonDecode(await file.readAsString());
-      if (decoded is! Map) {
-        return false;
-      }
-      return decoded['audio_track_present'] == true;
-    } catch (_) {
-      return false;
-    }
+    final combinedMov = File(p.join(sessionPath, 'data_with_audio.mov'));
+    return await combinedMov.exists();
   }
 
   String generateSceneName(String sessionName) {

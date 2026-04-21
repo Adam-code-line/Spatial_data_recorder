@@ -54,7 +54,10 @@ void main() {
       await frames2Dir.create(recursive: true);
       await File(p.join(frames2Dir.path, '00000000.png')).writeAsString('png0');
 
-      final manifest = await builder.buildFromSessionPath(sessionDir.path);
+      final manifest = await builder.buildFromSessionPath(
+        sessionDir.path,
+        includeDataWithAudioMov: true,
+      );
       final sessionContext = UploadSessionContext(
         captureType: UploadCaptureType.sceneOnly,
         sceneName: 'scene_demo',

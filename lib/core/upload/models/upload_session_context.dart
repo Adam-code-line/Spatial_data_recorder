@@ -58,6 +58,7 @@ class UploadSessionContext {
     required this.seqName,
     required this.audioTrackPresent,
     required this.confirmedAt,
+    this.uploadDataWithAudioMov = false,
     this.captureName,
     this.cam,
     this.pairGroupId,
@@ -73,6 +74,7 @@ class UploadSessionContext {
   final String? pairGroupId;
   final bool audioTrackPresent;
   final DateTime confirmedAt;
+  final bool uploadDataWithAudioMov;
 
   bool get isGrouped => pairGroupId != null && pairGroupId!.isNotEmpty;
 
@@ -87,6 +89,7 @@ class UploadSessionContext {
     String? pairGroupId,
     bool clearPairGroupId = false,
     bool? audioTrackPresent,
+    bool? uploadDataWithAudioMov,
     DateTime? confirmedAt,
   }) {
     return UploadSessionContext(
@@ -97,6 +100,8 @@ class UploadSessionContext {
       cam: clearCam ? null : (cam ?? this.cam),
       pairGroupId: clearPairGroupId ? null : (pairGroupId ?? this.pairGroupId),
       audioTrackPresent: audioTrackPresent ?? this.audioTrackPresent,
+      uploadDataWithAudioMov:
+          uploadDataWithAudioMov ?? this.uploadDataWithAudioMov,
       confirmedAt: confirmedAt ?? this.confirmedAt,
     );
   }
@@ -113,6 +118,7 @@ class UploadSessionContext {
       if (pairGroupId != null && pairGroupId!.isNotEmpty)
         'pairGroupId': pairGroupId,
       'audioTrackPresent': audioTrackPresent,
+      'uploadDataWithAudioMov': uploadDataWithAudioMov,
       'confirmedAt': confirmedAt.toUtc().toIso8601String(),
     };
   }
@@ -128,6 +134,7 @@ class UploadSessionContext {
       cam: UploadCam.fromWireValue(json['cam'] as String?),
       pairGroupId: (json['pairGroupId'] as String?)?.trim(),
       audioTrackPresent: json['audioTrackPresent'] == true,
+      uploadDataWithAudioMov: json['uploadDataWithAudioMov'] == true,
       confirmedAt:
           DateTime.tryParse(json['confirmedAt'] as String? ?? '') ??
           DateTime.now().toUtc(),

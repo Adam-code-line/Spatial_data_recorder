@@ -62,7 +62,10 @@ void main() {
       await File(p.join(frames2Dir.path, '00000000.png')).writeAsString('png0');
       await File(p.join(frames2Dir.path, '00000001.png')).writeAsString('png1');
 
-      final manifest = await builder.buildFromSessionPath(sessionDir.path);
+      final manifest = await builder.buildFromSessionPath(
+        sessionDir.path,
+        includeDataWithAudioMov: true,
+      );
       final relativePaths = manifest.entries
           .map((entry) => p.normalize(entry.relativePath))
           .toSet();
@@ -79,6 +82,41 @@ void main() {
 
       expect(relativePaths, isNot(contains(p.normalize('README.md'))));
       expect(relativePaths, isNot(contains(p.normalize('notes.txt'))));
+    });
+
+    test('skips data_with_audio.mov when includeDataWithAudioMov is false', () async {
+      final sessionDir = Directory(
+        p.join(tempRoot.path, 'recording_2026-04-07'),
+      );
+      await sessionDir.create(recursive: true);
+
+      for (final name in const <String>[
+        'data.mov',
+        'data.jsonl',
+        'calibration.json',
+        'metadata.json',
+      ]) {
+        await File(
+          p.join(sessionDir.path, name),
+        ).writeAsString('required-$name');
+      }
+
+      await File(
+        p.join(sessionDir.path, 'data_with_audio.mov'),
+      ).writeAsString('optional-data-with-audio');
+
+      final frames2Dir = Directory(p.join(sessionDir.path, 'frames2'));
+      await frames2Dir.create(recursive: true);
+      await File(p.join(frames2Dir.path, '00000000.png')).writeAsString('png0');
+
+      final manifest = await builder.buildFromSessionPath(sessionDir.path);
+      final relativePaths = manifest.entries
+          .map((entry) => p.normalize(entry.relativePath))
+          .toSet();
+
+      expect(relativePaths, isNot(contains(p.normalize('data_with_audio.mov'))));
+      expect(relativePaths, contains(p.normalize('data.mov')));
+      expect(relativePaths, contains(p.normalize('frames2/00000000.png')));
     });
 
     test('throws missingRequiredFile when required file is missing', () async {

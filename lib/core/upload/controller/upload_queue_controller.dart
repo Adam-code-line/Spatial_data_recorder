@@ -317,11 +317,12 @@ class UploadQueueController extends StateNotifier<UploadQueueState> {
     }
 
     try {
-      final manifest = await _manifestBuilder.buildFromSessionPath(
-        task.sessionPath,
-      );
       final sessionContext = await _contextService.ensureContextForSession(
         task.sessionPath,
+      );
+      final manifest = await _manifestBuilder.buildFromSessionPath(
+        task.sessionPath,
+        includeDataWithAudioMov: sessionContext.uploadDataWithAudioMov,
       );
       final zipResult = await _zipService.compressManifest(
         manifest,

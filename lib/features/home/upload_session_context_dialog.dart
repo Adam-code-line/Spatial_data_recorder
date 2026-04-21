@@ -103,6 +103,7 @@ class _UploadSessionContextDialogState
   late bool _reuseRecentGroup;
   late _GroupJoinMode _groupJoinMode;
   UploadGroupShare? _sharedJoinConfig;
+  late bool _uploadDataWithAudioMov;
 
   bool get _isRecordingSetup =>
       widget.mode == _UploadSessionDialogMode.recordingSetup;
@@ -137,6 +138,9 @@ class _UploadSessionContextDialogState
     _groupEnabled = widget.existing?.isGrouped ?? false;
     _reuseRecentGroup = false;
     _groupJoinMode = _GroupJoinMode.manualGroupId;
+    _uploadDataWithAudioMov =
+        (widget.existing?.uploadDataWithAudioMov ?? false) &&
+        widget.audioTrackPresent;
   }
 
   @override
@@ -510,6 +514,23 @@ class _UploadSessionContextDialogState
                           : '本次录制无音频，但允许继续上传',
                     ),
                   ),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('上传带音频版本'),
+                    subtitle: Text(
+                      widget.audioTrackPresent
+                          ? '将 data_with_audio.mov 也打进 ZIP（体积更大，上传更慢）'
+                          : '未找到 data_with_audio.mov，本次无法上传带音频版本',
+                    ),
+                    value: _uploadDataWithAudioMov,
+                    onChanged: widget.audioTrackPresent
+                        ? (value) {
+                            setState(() {
+                              _uploadDataWithAudioMov = value;
+                            });
+                          }
+                        : null,
+                  ),
                 ],
               ],
             ),
@@ -576,6 +597,7 @@ class _UploadSessionContextDialogState
       cam: (shareConfig?.captureType ?? _captureType) == UploadCaptureType.humanInScene ? _cam : null,
       pairGroupId: pairGroupId,
       audioTrackPresent: widget.audioTrackPresent,
+      uploadDataWithAudioMov: widget.audioTrackPresent && _uploadDataWithAudioMov,
       confirmedAt: DateTime.now().toUtc(),
     );
     Navigator.of(context).pop(sessionContext);
