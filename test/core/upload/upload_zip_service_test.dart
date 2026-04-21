@@ -46,6 +46,9 @@ void main() {
       await File(
         p.join(sessionDir.path, 'upload_context.json'),
       ).writeAsString('{"sceneName":"scene_demo","seqName":"seq_demo"}');
+      await File(
+        p.join(sessionDir.path, 'data_with_audio.mov'),
+      ).writeAsString('optional-data-with-audio');
 
       final frames2Dir = Directory(p.join(sessionDir.path, 'frames2'));
       await frames2Dir.create(recursive: true);

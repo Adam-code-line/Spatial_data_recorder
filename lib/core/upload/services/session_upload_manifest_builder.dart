@@ -15,6 +15,7 @@ class SessionUploadManifestBuilder {
   };
   static const Set<String> _optionalRootFiles = <String>{
     'data2.mov',
+    'data_with_audio.mov',
     'upload_context.json',
   };
 
