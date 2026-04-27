@@ -11,6 +11,7 @@ class UploadSessionContextService {
   );
   static final RegExp _allowedSeqNamePattern = RegExp(r'^seq\d+$');
   static const String _defaultsFileName = '.upload_context_defaults.json';
+  static const String _audioTrackFlagFileName = '.audio_track_present';
 
   Future<UploadSessionContext> ensureContextForSession(String sessionPath) async {
     final existing = await readForSession(sessionPath);
@@ -93,8 +94,12 @@ class UploadSessionContextService {
   }
 
   Future<bool> readAudioTrackPresent(String sessionPath) async {
-    final combinedMov = File(p.join(sessionPath, 'data_with_audio.mov'));
-    return await combinedMov.exists();
+    final flagFile = File(p.join(sessionPath, _audioTrackFlagFileName));
+    if (await flagFile.exists()) {
+      return true;
+    }
+    final legacyCombinedMov = File(p.join(sessionPath, 'data_with_audio.mov'));
+    return await legacyCombinedMov.exists();
   }
 
   String generateSceneName(String sessionName) {

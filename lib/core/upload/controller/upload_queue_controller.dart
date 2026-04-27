@@ -322,7 +322,6 @@ class UploadQueueController extends StateNotifier<UploadQueueState> {
       );
       final manifest = await _manifestBuilder.buildFromSessionPath(
         task.sessionPath,
-        includeDataWithAudioMov: sessionContext.uploadDataWithAudioMov,
       );
       final zipResult = await _zipService.compressManifest(
         manifest,

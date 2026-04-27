@@ -48,16 +48,13 @@ void main() {
       ).writeAsString('{"sceneName":"scene_demo","seqName":"seq_demo"}');
       await File(
         p.join(sessionDir.path, 'data_with_audio.mov'),
-      ).writeAsString('optional-data-with-audio');
+      ).writeAsString('legacy-ignored-data-with-audio');
 
       final frames2Dir = Directory(p.join(sessionDir.path, 'frames2'));
       await frames2Dir.create(recursive: true);
       await File(p.join(frames2Dir.path, '00000000.png')).writeAsString('png0');
 
-      final manifest = await builder.buildFromSessionPath(
-        sessionDir.path,
-        includeDataWithAudioMov: true,
-      );
+      final manifest = await builder.buildFromSessionPath(sessionDir.path);
       final sessionContext = UploadSessionContext(
         captureType: UploadCaptureType.sceneOnly,
         sceneName: 'scene_demo',

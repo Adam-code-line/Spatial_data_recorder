@@ -1,19 +1,17 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-import '../../core/recording/session_directory.dart';
-import '../../core/recorder/recorder_providers.dart';
-import '../../core/upload/models/upload_enqueue_result.dart';
-import '../../core/upload/models/upload_task.dart';
-import '../../core/upload/upload_providers.dart';
-import 'recordings_browser_page.dart';
-import 'recorder_live_preview.dart';
-import 'upload_session_context_dialog.dart';
+import 'package:spatial_data_recorder/core/recording/session_directory.dart';
+import 'package:spatial_data_recorder/core/recorder/recorder_providers.dart';
+import 'package:spatial_data_recorder/core/upload/models/upload_task.dart';
+import 'package:spatial_data_recorder/core/upload/upload_providers.dart';
+import 'package:spatial_data_recorder/features/home/recordings_browser_page.dart';
+import 'package:spatial_data_recorder/features/home/recorder_live_preview.dart';
+import 'package:spatial_data_recorder/features/home/upload_session_context_dialog.dart';
 
 class HomePage extends ConsumerStatefulWidget {
   const HomePage({super.key});
@@ -473,7 +471,7 @@ class _HomePageState extends ConsumerState<HomePage> {
                     height: 56,
                     child: DecoratedBox(
                       decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.18),
+                        color: Colors.white.withOpacity(0.18),
                         borderRadius: BorderRadius.circular(14),
                         border: Border.all(color: Colors.white24),
                       ),
@@ -515,19 +513,6 @@ class _HomePageState extends ConsumerState<HomePage> {
         return 'Fuchsia';
     }
   }
-
-  String _enqueueMessage(UploadEnqueueResult result) {
-    switch (result) {
-      case UploadEnqueueResult.created:
-        return '上传任务已加入队列。';
-      case UploadEnqueueResult.requeued:
-        return '上传任务已重新加入队列。';
-      case UploadEnqueueResult.alreadyQueued:
-        return '上传任务已在队列中。';
-      case UploadEnqueueResult.alreadySuccess:
-        return '该会话已上传成功。';
-    }
-  }
 }
 
 class _UploadStatusBanner extends StatelessWidget {
@@ -543,7 +528,7 @@ class _UploadStatusBanner extends StatelessWidget {
 
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.65),
+        color: Colors.black.withOpacity(0.65),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: Colors.white24),
       ),
@@ -638,7 +623,7 @@ class _RecordingElapsedBadge extends StatelessWidget {
   Widget build(BuildContext context) {
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.65),
+        color: Colors.black.withOpacity(0.65),
         borderRadius: BorderRadius.circular(999),
         border: Border.all(color: Colors.white24),
       ),
@@ -663,3 +648,4 @@ class _RecordingElapsedBadge extends StatelessWidget {
     );
   }
 }
+

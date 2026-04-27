@@ -46,7 +46,7 @@ void main() {
       ).writeAsString('optional-data2');
       await File(
         p.join(sessionDir.path, 'data_with_audio.mov'),
-      ).writeAsString('optional-data-with-audio');
+      ).writeAsString('legacy-ignored-data-with-audio');
       await File(
         p.join(sessionDir.path, 'upload_context.json'),
       ).writeAsString('{"sceneName":"scene_demo","seqName":"seq_demo"}');
@@ -62,10 +62,7 @@ void main() {
       await File(p.join(frames2Dir.path, '00000000.png')).writeAsString('png0');
       await File(p.join(frames2Dir.path, '00000001.png')).writeAsString('png1');
 
-      final manifest = await builder.buildFromSessionPath(
-        sessionDir.path,
-        includeDataWithAudioMov: true,
-      );
+      final manifest = await builder.buildFromSessionPath(sessionDir.path);
       final relativePaths = manifest.entries
           .map((entry) => p.normalize(entry.relativePath))
           .toSet();
@@ -75,16 +72,19 @@ void main() {
       expect(relativePaths, contains(p.normalize('calibration.json')));
       expect(relativePaths, contains(p.normalize('metadata.json')));
       expect(relativePaths, contains(p.normalize('data2.mov')));
-      expect(relativePaths, contains(p.normalize('data_with_audio.mov')));
       expect(relativePaths, contains(p.normalize('upload_context.json')));
       expect(relativePaths, contains(p.normalize('frames2/00000000.png')));
       expect(relativePaths, contains(p.normalize('frames2/00000001.png')));
 
       expect(relativePaths, isNot(contains(p.normalize('README.md'))));
       expect(relativePaths, isNot(contains(p.normalize('notes.txt'))));
+      expect(
+        relativePaths,
+        isNot(contains(p.normalize('data_with_audio.mov'))),
+      );
     });
 
-    test('skips data_with_audio.mov when includeDataWithAudioMov is false', () async {
+    test('ignores legacy data_with_audio.mov sidecar', () async {
       final sessionDir = Directory(
         p.join(tempRoot.path, 'recording_2026-04-07'),
       );

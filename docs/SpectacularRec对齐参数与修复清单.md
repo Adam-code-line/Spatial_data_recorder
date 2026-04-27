@@ -22,8 +22,8 @@
 - `metadata.json`：最小元数据（样例只有 `device_model` / `platform`）
 - `frames2/*.png`：深度逐帧 PNG（16-bit gray）
 
-> 说明：本项目的产品诉求是“尽量与 Spectacular Rec 对齐，但允许保留音频做额外处理”。  
-> 推荐做法是：**提供给 Spectacular CLI 处理的目录仍保持 `data.mov` 无音轨**；音频以额外文件或额外导出版本保留（见 §3.2、§4-P0-2、§5-2）。
+> 说明：样例的 `data.mov` 无音轨；当前项目已改为**只产出一个 `data.mov`**，并在开启音频时将音轨直接封装进该文件。  
+> 如果某条下游工具链仍要求“纯视频 `data.mov`”，需要在消费前额外导出无音轨副本（见 §3.2、§4-P0-2、§5-2）。
 
 ### 2.2 深度帧序列 `frames2/*.png`
 
@@ -81,14 +81,35 @@
 
 这通常不是“时长差异”，而是**深度流格式（activeDepthDataFormat）未对齐**导致的。
 
-### 3.2 `data.mov` 音轨策略（关键，当前实现已对齐）
+### 3.2 `data.mov` 音轨策略（关键，当前实现为有意识偏离）
 
 - `spec/data.mov`：仅 H.264 视频（无音轨）
-- `ours/data.mov`：仅 H.264 视频（无音轨，作为工具链/CLI 输入）
-- `ours/data_with_audio.mov`：可选，H.264 视频 + 音频轨（用于回放/现场记录/额外处理）
+- `ours/data.mov`：主产物；关闭音频时仅视频，开启音频且录制成功时为 H.264 视频 + 音频轨
+- `ours/`：不再额外导出 `data_with_audio.mov`
 
-对齐目标（用于 Spectacular CLI 输入）是：**让“给 CLI 的 `data.mov`”无音轨**，保持与样例一致。  
-当前实现采用“**双产物**”策略：`data.mov` 永远纯视频；若开启音频且成功录到，会额外导出 `data_with_audio.mov`。
+这意味着：**当前录制目录优先服务业务采集与回放，`data.mov` 是否带音轨取决于录制配置**。  
+如果后续还要把这批数据喂给严格按 Spectacular 样例验收的 CLI/脚本，需要在进入工具链前额外做一次“去音轨”预处理。
+
+#### 3.2.1 为什么 `data.mov` 带音轨会“影响下游”
+
+这里的“影响”主要不是指算法一定变差，而是指：**工具链兼容性、时间轴稳定性与工程风险**会显著上升。
+
+**影响什么：**
+
+- **合同/验收不一致**：Spectacular 样例的 `data.mov` 只有 1 条 video stream；很多下游脚本会把“`data.mov` 仅视频流”当作合同的一部分（例如直接检查 stream 数量、是否存在 audio stream）。
+- **解析/抽帧脚本更脆弱**：少数工具/脚本会对 stream 顺序做假设（例如“第 0 条 stream 就是视频”）。一旦容器里出现音轨，stream 排序/选择策略不再稳定，轻则取错流，重则直接报错或抽帧为 0。
+- **时间轴相关统计更容易误判**：一些检查会用容器层 `duration`、`start_time`、`bit_rate` 之类字段做对齐判断；音轨一旦存在，“谁更长/谁先开始”会影响容器层的表现，从而让“视频时长/帧数估算”出现偏差。
+- **录制端稳定性风险上升**：在移动端同时采集/编码/写入音频会增加 CPU、I/O 与 AVFoundation 管线压力；极端情况下会间接增加视频丢帧与 PTS 抖动概率（而这恰好是下游 VIO/SLAM 最敏感的指标之一）。
+
+**怎么影响（机制层面）：**
+
+- MOV/MP4 是 **多轨容器**：音频与视频各自有独立的 timebase/timescale，容器层还有一个 movie timescale。加入音轨后，导出/封装步骤为了保持 A/V 同步可能会引入额外的时间量化、对齐与裁剪逻辑（例如以较短轨为准裁剪，或出现非零 `start_time` / edit list）。
+- 一旦发生“为了对齐音视频而改写时间轴”的行为，下游若把 `data.mov` 当作“纯视频时钟”来对齐 `data.jsonl`，就更容易出现**帧时间不稳、短长帧混杂、帧-IMU 对齐漂移**等问题。
+
+**因此当前策略：**
+
+- **录制会话目录本身**：只保留一个 `data.mov`；若录制时启用音频，则该文件直接带音轨。
+- **给 Spectacular CLI / 严格样例工具链的目录**：在进入下游前，从 `data.mov` 额外导出无音轨副本（例如 `data_cli.mov`），不要再依赖双产物目录结构。
 
 ### 3.3 `data.mov` 标称帧率 / 帧间隔抖动（关键）
 
@@ -146,10 +167,11 @@
    - 模块：`ios/Runner/SlamRecordingSession.swift`
    - 重点：优先选择 `activeDepthDataFormat` 中 **256×192** 的 depth format；若设备不支持需明确回退策略
 
-2. **给 Spectacular CLI 的 `data.mov` 保持无音轨；音频作为“额外处理”保留**
-   - 目标：输入给 Spectacular CLI 的目录结构与样例一致（`data.mov` 仅视频流）
-   - 推荐方案：`data.mov` 始终纯视频；若需要音频，额外导出 `data_with_audio.mov`（或保留 `audio.m4a` sidecar）用于额外处理
-   - 旧数据兼容：若你已有“带音轨的 `data.mov`”，可额外导出 `data_cli.mov`（仅视频流）供 CLI 使用
+2. **让录制产物只保留一个 `data.mov`；若下游仍要求纯视频，则补一层去音轨预处理**
+   - 目标：应用侧不再维护 `data.mov` / `data_with_audio.mov` 双产物，最终会话目录只保留一个主视频文件
+   - 当前方案：开启音频时直接把音轨封装进 `data.mov`；关闭音频时 `data.mov` 仍为纯视频
+   - CLI 兼容：若下游脚本仍要求仅视频流，可额外导出 `data_cli.mov`（或覆盖生成无音轨 `data.mov`）供 CLI 使用
+   - 原因：见 §3.2.1（音轨对工具链/时间轴/稳定性的影响）
 
 3. **确保视频采集锁到 30fps，避免 60fps 丢帧**
    - 模块：`ios/Runner/SlamRecordingSession.swift`
@@ -183,10 +205,11 @@
 1. **检查 frames2 PNG 规格**
    - 任取 `frames2/00000000.png`，校验 IHDR：`256x192`、`bitDepth=16`、`colorType=0`
 
-2. **检查“给 Spectacular CLI 的 data.mov”是否无音轨**
+2. **检查 `data.mov` 的音轨状态是否符合当前用途**
    - 用 `ffprobe -hide_banner -show_streams data.mov`（或你们内部脚本）
-   - 期望仅有 1 条 video stream，且 `codec_name=h264`
-   - 若你需要音频：检查是否生成了 `data_with_audio.mov`；若是旧数据/外部视频仍带音轨，可导出无音轨版本供 CLI 使用（如 `data_cli.mov`）
+   - 若本次录制启用了音频：期望至少包含 1 条 `video` stream 和 1 条 `audio` stream
+   - 若要送入严格按样例验收的 CLI：先导出无音轨版本，再检查该副本是否只包含 1 条 `video` stream
+   - 说明：为什么要这样验收见 §3.2.1
 
 3. **检查帧率与抖动**
    - `r_frame_rate` 期望 30/1

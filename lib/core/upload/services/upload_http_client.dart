@@ -40,8 +40,6 @@ class UploadHttpClient {
           'pairGroupId': pairGroupId,
         if (sessionContext != null)
           'audioTrackPresent': sessionContext.audioTrackPresent ? 'true' : 'false',
-        if (sessionContext != null)
-          'uploadDataWithAudioMov': sessionContext.uploadDataWithAudioMov ? 'true' : 'false',
       };
       final formData = FormData.fromMap(formFields);
 

@@ -15,16 +15,14 @@ class SessionUploadManifestBuilder {
   };
   static const Set<String> _optionalRootFiles = <String>{
     'data2.mov',
-    'data_with_audio.mov',
     'upload_context.json',
   };
 
   static const String _requiredFramesDir = 'frames2';
 
   Future<SessionUploadManifest> buildFromSessionPath(
-    String sessionPath, {
-    bool includeDataWithAudioMov = false,
-  }) async {
+    String sessionPath,
+  ) async {
     final sessionDir = Directory(sessionPath);
     if (!await sessionDir.exists()) {
       throw UploadException(
@@ -65,9 +63,6 @@ class SessionUploadManifestBuilder {
     }
 
     for (final fileName in _optionalRootFiles) {
-      if (fileName == 'data_with_audio.mov' && !includeDataWithAudioMov) {
-        continue;
-      }
       final file = File(p.join(sessionDir.path, fileName));
       if (!await file.exists()) {
         continue;

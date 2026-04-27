@@ -5,12 +5,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
-import '../../core/upload/models/upload_enqueue_result.dart';
-import '../../core/upload/models/upload_queue_state.dart';
-import '../../core/upload/models/upload_session_context.dart';
-import '../../core/upload/models/upload_task.dart';
-import '../../core/upload/upload_providers.dart';
-import 'upload_session_context_dialog.dart';
+import 'package:spatial_data_recorder/core/upload/models/upload_enqueue_result.dart';
+import 'package:spatial_data_recorder/core/upload/models/upload_queue_state.dart';
+import 'package:spatial_data_recorder/core/upload/models/upload_session_context.dart';
+import 'package:spatial_data_recorder/core/upload/models/upload_task.dart';
+import 'package:spatial_data_recorder/core/upload/upload_providers.dart';
+import 'package:spatial_data_recorder/features/home/upload_session_context_dialog.dart';
 
 class RecordingsBrowserPage extends ConsumerStatefulWidget {
   const RecordingsBrowserPage({super.key});

@@ -178,6 +178,25 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     outputDirectory.appendingPathComponent("frames2", isDirectory: true)
   }
 
+  private var finalMovieURL: URL {
+    outputDirectory.appendingPathComponent("data.mov")
+  }
+
+  private var primaryRecordingMovieURL: URL {
+    if audioCaptureEnabled {
+      return outputDirectory.appendingPathComponent("data_video.mov")
+    }
+    return finalMovieURL
+  }
+
+  private var audioSidecarURL: URL {
+    outputDirectory.appendingPathComponent("audio.m4a")
+  }
+
+  private var audioTrackFlagURL: URL {
+    outputDirectory.appendingPathComponent(".audio_track_present")
+  }
+
   init(outputDirectory: URL, enableAudio: Bool) {
     self.outputDirectory = outputDirectory
     self.requestedAudioCapture = enableAudio
@@ -1179,12 +1198,16 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     videoWidth = width
     videoHeight = height
 
-    let movieURL = outputDirectory.appendingPathComponent("data.mov")
-    try? FileManager.default.removeItem(at: movieURL)
-    let audioURL = outputDirectory.appendingPathComponent("audio.m4a")
-    try? FileManager.default.removeItem(at: audioURL)
-    let dataWithAudioURL = outputDirectory.appendingPathComponent("data_with_audio.mov")
-    try? FileManager.default.removeItem(at: dataWithAudioURL)
+    let movieURL = primaryRecordingMovieURL
+    try? FileManager.default.removeItem(at: finalMovieURL)
+    if movieURL != finalMovieURL {
+      try? FileManager.default.removeItem(at: movieURL)
+    }
+    try? FileManager.default.removeItem(at: audioSidecarURL)
+    try? FileManager.default.removeItem(at: audioTrackFlagURL)
+    try? FileManager.default.removeItem(
+      at: outputDirectory.appendingPathComponent("data_with_audio.mov")
+    )
 
     audioWriter = nil
     audioWriterInput = nil
@@ -1444,7 +1467,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
   }
 
   private func hasValidRecordedVideos() -> Bool {
-    let movieURL = outputDirectory.appendingPathComponent("data.mov")
+    let movieURL = primaryRecordingMovieURL
     guard Self.videoResolution(from: movieURL) != nil else { return false }
 
     if lastSecondaryWrittenPts != nil {
@@ -1455,25 +1478,50 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
     return true
   }
 
-  private func exportDataWithAudioMovIfPossible(completion: @escaping () -> Void) {
-    guard lastAudioWrittenPts != nil else {
+  private func updateAudioTrackFlag(present: Bool) {
+    let fm = FileManager.default
+    try? fm.removeItem(at: audioTrackFlagURL)
+    guard present else { return }
+    fm.createFile(atPath: audioTrackFlagURL.path, contents: Data(), attributes: nil)
+  }
+
+  private func finalizePrimaryMovieIfNeeded(completion: @escaping () -> Void) {
+    let fm = FileManager.default
+    let recordedVideoURL = primaryRecordingMovieURL
+    let outputURL = finalMovieURL
+    let audioURL = audioSidecarURL
+
+    func finishWithoutAudio() {
+      updateAudioTrackFlag(present: false)
+      try? fm.removeItem(at: audioURL)
+      guard fm.fileExists(atPath: recordedVideoURL.path) else {
+        completion()
+        return
+      }
+      if recordedVideoURL != outputURL {
+        try? fm.removeItem(at: outputURL)
+        do {
+          try fm.moveItem(at: recordedVideoURL, to: outputURL)
+        } catch {
+          print("[SLAM] move data_video.mov -> data.mov failed: \(error)")
+        }
+      }
       completion()
+    }
+
+    guard lastAudioWrittenPts != nil else {
+      finishWithoutAudio()
       return
     }
 
-    let videoURL = outputDirectory.appendingPathComponent("data.mov")
-    let audioURL = outputDirectory.appendingPathComponent("audio.m4a")
-    let outputURL = outputDirectory.appendingPathComponent("data_with_audio.mov")
-
-    let fm = FileManager.default
-    guard fm.fileExists(atPath: videoURL.path), fm.fileExists(atPath: audioURL.path) else {
-      completion()
+    guard fm.fileExists(atPath: recordedVideoURL.path), fm.fileExists(atPath: audioURL.path) else {
+      finishWithoutAudio()
       return
     }
 
     try? fm.removeItem(at: outputURL)
 
-    let videoAsset = AVURLAsset(url: videoURL)
+    let videoAsset = AVURLAsset(url: recordedVideoURL)
     let audioAsset = AVURLAsset(url: audioURL)
 
     let composition = AVMutableComposition()
@@ -1529,12 +1577,16 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       self.syncQueue.async {
         if exporter?.status == .completed {
           try? fm.removeItem(at: audioURL)
+          if recordedVideoURL != outputURL {
+            try? fm.removeItem(at: recordedVideoURL)
+          }
+          self.updateAudioTrackFlag(present: true)
           completion()
           return
         }
 
         if let error = exporter?.error {
-          print("[SLAM] passthrough export data_with_audio.mov failed: \(error)")
+          print("[SLAM] passthrough export data.mov with audio failed: \(error)")
         }
         try? fm.removeItem(at: outputURL)
 
@@ -1542,11 +1594,17 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
           self.syncQueue.async {
             if exporter?.status == .completed {
               try? fm.removeItem(at: audioURL)
+              if recordedVideoURL != outputURL {
+                try? fm.removeItem(at: recordedVideoURL)
+              }
+              self.updateAudioTrackFlag(present: true)
             } else {
               if let error = exporter?.error {
-                print("[SLAM] re-encode export data_with_audio.mov failed: \(error)")
+                print("[SLAM] re-encode export data.mov with audio failed: \(error)")
               }
               try? fm.removeItem(at: outputURL)
+              finishWithoutAudio()
+              return
             }
             completion()
           }
@@ -1625,7 +1683,7 @@ final class SlamRecordingSession: NSObject, AVCaptureDataOutputSynchronizerDeleg
       self.writeCalibrationJson()
       self.writeMetadataJson()
 
-      self.exportDataWithAudioMovIfPossible {
+      self.finalizePrimaryMovieIfNeeded {
         DispatchQueue.main.async {
           UIApplication.shared.isIdleTimerDisabled = false
           completion(.success(self.outputDirectory))
