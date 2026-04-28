@@ -42,6 +42,13 @@ class RecorderMethodChannel implements RecorderPlatform {
     if (path is String) {
       return path;
     }
-    throw StateError('stopRecording 未返回路径');
+    throw StateError('stopRecording did not return a path');
+  }
+
+  @override
+  Future<void> shareFile(String filePath) async {
+    await _channel.invokeMethod<void>('shareFile', <String, dynamic>{
+      'filePath': filePath,
+    });
   }
 }

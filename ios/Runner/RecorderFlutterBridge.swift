@@ -1,6 +1,7 @@
 import AVFoundation
 import Flutter
 import Foundation
+import UIKit
 
 /// 将 `SlamRecordingSession` 接到 Flutter `MethodChannel`。
 final class RecorderFlutterBridge {
@@ -178,8 +179,71 @@ final class RecorderFlutterBridge {
         }
       }
 
+    case "shareFile":
+      guard let args = call.arguments as? [String: Any],
+            let filePath = args["filePath"] as? String
+      else {
+        result(
+          FlutterError(code: "bad_args", message: "需要 filePath: String", details: nil)
+        )
+        return
+      }
+      presentShareSheet(filePath: filePath, result: result)
+
     default:
       result(FlutterMethodNotImplemented)
     }
+  }
+
+  private func presentShareSheet(filePath: String, result: @escaping FlutterResult) {
+    guard FileManager.default.fileExists(atPath: filePath) else {
+      result(
+        FlutterError(code: "file_not_found", message: "分享文件不存在", details: filePath)
+      )
+      return
+    }
+
+    DispatchQueue.main.async {
+      guard let controller = self.topViewController() else {
+        result(
+          FlutterError(code: "no_view_controller", message: "无法打开分享面板", details: nil)
+        )
+        return
+      }
+
+      let url = URL(fileURLWithPath: filePath)
+      let activityController = UIActivityViewController(
+        activityItems: [url],
+        applicationActivities: nil
+      )
+      if let popover = activityController.popoverPresentationController {
+        popover.sourceView = controller.view
+        popover.sourceRect = CGRect(
+          x: controller.view.bounds.midX,
+          y: controller.view.bounds.midY,
+          width: 0,
+          height: 0
+        )
+        popover.permittedArrowDirections = []
+      }
+
+      controller.present(activityController, animated: true) {
+        result(nil)
+      }
+    }
+  }
+
+  private func topViewController() -> UIViewController? {
+    let root = UIApplication.shared.connectedScenes
+      .compactMap { $0 as? UIWindowScene }
+      .flatMap { $0.windows }
+      .first { $0.isKeyWindow }?
+      .rootViewController
+
+    var top = root
+    while let presented = top?.presentedViewController {
+      top = presented
+    }
+    return top
   }
 }

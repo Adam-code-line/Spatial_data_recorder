@@ -12,4 +12,6 @@ abstract class RecorderPlatform {
 
   /// 结束录制并返回会话目录路径（与 [startRecording] 传入的目录一致）。
   Future<String> stopRecording();
+
+  Future<void> shareFile(String filePath);
 }

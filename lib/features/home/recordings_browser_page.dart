@@ -1,10 +1,12 @@
 import 'dart:io';
 
+import 'package:archive/archive_io.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import 'package:spatial_data_recorder/core/recorder/recorder_providers.dart';
 import 'package:spatial_data_recorder/core/upload/models/upload_enqueue_result.dart';
 import 'package:spatial_data_recorder/core/upload/models/upload_queue_state.dart';
 import 'package:spatial_data_recorder/core/upload/models/upload_session_context.dart';
@@ -262,6 +264,167 @@ class _RecordingsBrowserPageState extends ConsumerState<RecordingsBrowserPage> {
     }
   }
 
+  Future<void> _handleSeqDelete(_SeqGroup group) async {
+    final confirmed = await _confirmBulkDelete(
+      title: '删除整个 seq',
+      message:
+          '将删除 seq “${group.seqName}” 下的 ${group.sessions.length} 个本地记录，并移除对应上传任务。此操作不可恢复。',
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      await _deleteSessionEntries(group.sessions);
+      await _reloadAfterRecordingDelete();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已删除 seq：${group.seqName}')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('删除 seq 失败：$e')));
+    }
+  }
+
+  Future<void> _handleSceneDelete(_SceneGroup group) async {
+    final confirmed = await _confirmBulkDelete(
+      title: '删除整个 scene',
+      message:
+          '将删除 scene “${group.sceneName}” 下的 ${group.seqGroups.length} 个 seq、${group.sessionCount} 个本地记录，并移除对应上传任务。此操作不可恢复。',
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      await _deleteSessionEntries(group.sessions);
+      await _reloadAfterRecordingDelete();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已删除 scene：${group.sceneName}')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('删除 scene 失败：$e')));
+    }
+  }
+
+  Future<bool> _confirmBulkDelete({
+    required String title,
+    required String message,
+  }) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+              foregroundColor: Theme.of(context).colorScheme.onError,
+            ),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    return confirmed == true;
+  }
+
+  Future<void> _deleteSessionEntries(List<_SessionEntry> sessions) async {
+    final queueController = ref.read(uploadQueueControllerProvider.notifier);
+    for (final session in sessions) {
+      await queueController.removeSession(session.directory.path);
+      if (await session.directory.exists()) {
+        await session.directory.delete(recursive: true);
+      }
+    }
+  }
+
+  Future<void> _handleSceneExport(_SceneGroup group) async {
+    if (group.sessions.isEmpty) {
+      return;
+    }
+
+    try {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('正在导出 scene：${group.sceneName}')),
+      );
+      final zipFile = await _exportSceneZip(group);
+      if (!mounted) return;
+      await ref.read(recorderPlatformProvider).shareFile(zipFile.path);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已生成导出文件：${p.basename(zipFile.path)}')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('导出 scene 失败：$e')));
+    }
+  }
+
+  Future<File> _exportSceneZip(_SceneGroup group) async {
+    final outputRoot = _outputRoot;
+    if (outputRoot == null) {
+      throw StateError('output 目录未初始化');
+    }
+
+    final exportDir = Directory(p.join(outputRoot.path, '.exports'));
+    if (!await exportDir.exists()) {
+      await exportDir.create(recursive: true);
+    }
+
+    final timestamp = DateTime.now().millisecondsSinceEpoch;
+    final sceneToken = _safeFileToken(group.sceneName);
+    final zipPath = p.join(exportDir.path, 'scene_${sceneToken}_$timestamp.zip');
+    final encoder = ZipFileEncoder();
+    encoder.create(zipPath, level: ZipFileEncoder.store);
+    try {
+      for (final session in group.sessions) {
+        if (await session.directory.exists()) {
+          await encoder.addDirectory(
+            session.directory,
+            includeDirName: true,
+            followLinks: false,
+            level: ZipFileEncoder.store,
+          );
+        }
+      }
+    } finally {
+      await encoder.close();
+    }
+
+    final zipFile = File(zipPath);
+    if (!await zipFile.exists()) {
+      throw StateError('导出 ZIP 未生成');
+    }
+    return zipFile;
+  }
+
+  String _safeFileToken(String value) {
+    final sanitized = value
+        .trim()
+        .replaceAll(RegExp(r'[^A-Za-z0-9._-]+'), '_')
+        .replaceAll(RegExp(r'_+'), '_');
+    if (sanitized.isEmpty) {
+      return 'scene';
+    }
+    return sanitized;
+  }
+
   Future<void> _reloadAfterRecordingDelete() async {
     final currentDir = _currentDir;
     if (currentDir != null && await currentDir.exists()) {
@@ -505,7 +668,37 @@ class _RecordingsBrowserPageState extends ConsumerState<RecordingsBrowserPage> {
           subtitle: Text(
             '${group.seqGroups.length} 个 seq，${group.sessionCount} 个录制',
           ),
-          trailing: const Icon(Icons.chevron_right),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              PopupMenuButton<String>(
+                onSelected: (value) {
+                  if (value == 'export') {
+                    _handleSceneExport(group);
+                  } else if (value == 'delete') {
+                    _handleSceneDelete(group);
+                  }
+                },
+                itemBuilder: (context) => [
+                  const PopupMenuItem<String>(
+                    value: 'export',
+                    child: Text('导出 scene'),
+                  ),
+                  const PopupMenuDivider(),
+                  PopupMenuItem<String>(
+                    value: 'delete',
+                    child: Text(
+                      '删除整个 scene',
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.error,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const Icon(Icons.chevron_right),
+            ],
+          ),
           onTap: () {
             setState(() {
               _activeSceneName = group.sceneName;
@@ -530,7 +723,30 @@ class _RecordingsBrowserPageState extends ConsumerState<RecordingsBrowserPage> {
           leading: const Icon(Icons.folder_shared),
           title: Text(group.seqName),
           subtitle: Text('${group.sessions.length} 个录制'),
-          trailing: const Icon(Icons.chevron_right),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              PopupMenuButton<String>(
+                onSelected: (value) {
+                  if (value == 'delete') {
+                    _handleSeqDelete(group);
+                  }
+                },
+                itemBuilder: (context) => [
+                  PopupMenuItem<String>(
+                    value: 'delete',
+                    child: Text(
+                      '删除整个 seq',
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.error,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const Icon(Icons.chevron_right),
+            ],
+          ),
           onTap: () {
             setState(() {
               _activeSeqName = group.seqName;
@@ -658,6 +874,10 @@ class _SceneGroup {
 
   final String sceneName;
   final List<_SeqGroup> seqGroups;
+
+  List<_SessionEntry> get sessions => seqGroups
+      .expand((group) => group.sessions)
+      .toList(growable: false);
 
   int get sessionCount =>
       seqGroups.fold<int>(0, (count, group) => count + group.sessions.length);
