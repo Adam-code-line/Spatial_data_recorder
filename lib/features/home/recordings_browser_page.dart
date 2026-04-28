@@ -206,6 +206,112 @@ class _RecordingsBrowserPageState extends ConsumerState<RecordingsBrowserPage> {
     }
   }
 
+  Future<void> _handleRecordingDelete(
+    Directory directory,
+    UploadTask? uploadTask,
+  ) async {
+    final name = p.basename(directory.path);
+    final uploadTaskIsActive = uploadTask != null && !uploadTask.isTerminal;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('删除本地记录'),
+        content: Text(
+          uploadTaskIsActive
+              ? '将取消该记录的上传任务，并删除本地目录“$name”。此操作不可恢复。'
+              : '将删除本地目录“$name”。此操作不可恢复。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+              foregroundColor: Theme.of(context).colorScheme.onError,
+            ),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) {
+      return;
+    }
+
+    try {
+      await ref
+          .read(uploadQueueControllerProvider.notifier)
+          .removeSession(directory.path);
+      if (await directory.exists()) {
+        await directory.delete(recursive: true);
+      }
+      await _reloadAfterRecordingDelete();
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('已删除本地记录：$name')));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('删除失败：$e')));
+    }
+  }
+
+  Future<void> _reloadAfterRecordingDelete() async {
+    final currentDir = _currentDir;
+    if (currentDir != null && await currentDir.exists()) {
+      await _openDirectory(currentDir);
+      await _reloadGroupedDataIfNeeded();
+      return;
+    }
+
+    final outputRoot = _outputRoot;
+    if (outputRoot == null) {
+      return;
+    }
+
+    final sceneGroups = await _buildSceneGroups(outputRoot);
+    if (!mounted) return;
+
+    var nextSceneName = _activeSceneName;
+    var nextSeqName = _activeSeqName;
+    _SceneGroup? nextSceneGroup;
+    if (nextSceneName != null) {
+      for (final group in sceneGroups) {
+        if (group.sceneName == nextSceneName) {
+          nextSceneGroup = group;
+          break;
+        }
+      }
+      if (nextSceneGroup == null) {
+        nextSceneName = null;
+        nextSeqName = null;
+      }
+    }
+
+    if (nextSceneGroup != null && nextSeqName != null) {
+      final seqStillExists = nextSceneGroup.seqGroups.any(
+        (group) => group.seqName == nextSeqName,
+      );
+      if (!seqStillExists) {
+        nextSeqName = null;
+      }
+    }
+
+    setState(() {
+      _currentDir = null;
+      _entries = const [];
+      _sceneGroups = sceneGroups;
+      _activeSceneName = nextSceneName;
+      _activeSeqName = nextSeqName;
+    });
+  }
+
   Future<void> _reloadGroupedDataIfNeeded() async {
     final outputRoot = _outputRoot;
     if (outputRoot == null) {
@@ -515,6 +621,8 @@ class _RecordingsBrowserPageState extends ConsumerState<RecordingsBrowserPage> {
                 _handleRecordingUpload(directory, uploadTask);
               } else if (value == 'open') {
                 _openDirectory(directory);
+              } else if (value == 'delete') {
+                _handleRecordingDelete(directory, uploadTask);
               }
             },
             itemBuilder: (context) => [
@@ -523,6 +631,16 @@ class _RecordingsBrowserPageState extends ConsumerState<RecordingsBrowserPage> {
                 value: 'upload',
                 enabled: _canTriggerUpload(uploadTask),
                 child: Text(_uploadActionLabel(uploadTask)),
+              ),
+              const PopupMenuDivider(),
+              PopupMenuItem<String>(
+                value: 'delete',
+                child: Text(
+                  '删除本地记录',
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.error,
+                  ),
+                ),
               ),
             ],
           ),

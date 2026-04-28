@@ -192,6 +192,41 @@ class UploadQueueController extends StateNotifier<UploadQueueState> {
     await enqueueSession(normalizedSessionPath);
   }
 
+  Future<void> removeSession(String sessionPath) async {
+    await _bootstrapFuture;
+
+    final normalizedSessionPath = p.normalize(sessionPath);
+    final removedTasks = state.tasks
+        .where((task) => p.normalize(task.sessionPath) == normalizedSessionPath)
+        .toList(growable: false);
+    if (removedTasks.isEmpty) {
+      return;
+    }
+
+    final activeTaskId = state.activeTaskId;
+    if (activeTaskId != null &&
+        removedTasks.any((task) => task.id == activeTaskId)) {
+      _activeCancelToken?.cancel('session_deleted');
+    }
+
+    for (final task in removedTasks) {
+      await _zipService.deleteZipIfExists(task.zipPath);
+    }
+
+    final remainingTasks = state.tasks
+        .where((task) => p.normalize(task.sessionPath) != normalizedSessionPath)
+        .toList(growable: false);
+    final removedActiveTask =
+        activeTaskId != null &&
+        removedTasks.any((task) => task.id == activeTaskId);
+    state = state.copyWith(
+      tasks: remainingTasks,
+      isProcessing: removedActiveTask ? false : null,
+      clearActiveTaskId: removedActiveTask,
+    );
+    await _repository.writeTasks(remainingTasks);
+  }
+
   Future<void> cancelActiveTask(String taskId) async {
     await _bootstrapFuture;
 
